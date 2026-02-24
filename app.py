@@ -38,6 +38,48 @@ def get_db():
     return conn
 
 
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS pharmacies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            npi TEXT UNIQUE NOT NULL, organization_name TEXT, dba_name TEXT,
+            entity_type TEXT, address_line1 TEXT, address_line2 TEXT,
+            city TEXT, state TEXT, zip TEXT, county TEXT, phone TEXT, fax TEXT,
+            taxonomy_code TEXT, taxonomy_description TEXT,
+            is_chain INTEGER DEFAULT 0, is_independent INTEGER DEFAULT 1,
+            is_institutional INTEGER DEFAULT 0, chain_parent TEXT,
+            authorized_official_name TEXT, authorized_official_title TEXT,
+            authorized_official_phone TEXT, ownership_type TEXT,
+            medicare_claims_count INTEGER, medicare_beneficiary_count INTEGER,
+            medicare_total_cost REAL, latitude REAL, longitude REAL,
+            dedup_key TEXT, first_seen TEXT, last_refreshed TEXT,
+            zip_population INTEGER, zip_median_income INTEGER,
+            zip_pct_65_plus REAL, zip_pop_growth_pct REAL,
+            zip_medicare_claims INTEGER, zip_medicare_cost REAL,
+            zip_medicare_beneficiaries INTEGER, zip_pharmacy_count INTEGER,
+            zip_pharmacies_per_10k REAL, competition_score REAL,
+            market_demand_score REAL, acquisition_score REAL
+        );
+        CREATE TABLE IF NOT EXISTS pharmacy_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            npi TEXT, organization_name TEXT, change_type TEXT,
+            field_changed TEXT, old_value TEXT, new_value TEXT, detected_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT, completed_at TEXT, status TEXT DEFAULT 'pending',
+            records_processed INTEGER DEFAULT 0, records_added INTEGER DEFAULT 0,
+            records_updated INTEGER DEFAULT 0, changes_detected INTEGER DEFAULT 0,
+            error_log TEXT
+        );
+    """)
+    conn.close()
+
+
+init_db()
+
+
 # ─── Helper Queries ──────────────────────────────────────────────────────────
 
 def get_stats():
