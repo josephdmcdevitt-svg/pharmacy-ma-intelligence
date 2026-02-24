@@ -220,8 +220,6 @@ stats = get_stats()
 if stats["total"] > 0:
     st.sidebar.metric("Independent Pharmacies", f"{stats['independent']:,}")
     st.sidebar.metric("Est. Scripts/Year", f"{stats['total_rx']:,.0f}")
-    st.sidebar.metric("Est. Scripts/Month", f"{stats['total_rx'] / 12:,.0f}")
-    st.sidebar.metric("Total Est. File Value", f"${stats['total_file_val']:,.0f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -237,13 +235,11 @@ if page == "Dashboard":
         import plotly.express as px
 
         # Row 1: Key metrics
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Independent Targets", f"{stats['independent']:,}")
         c2.metric("Scripts/Year", f"{stats['total_rx']:,.0f}")
-        c3.metric("Scripts/Month", f"{stats['total_rx'] / 12:,.0f}")
-        c4.metric("Est. Total File Value", f"${stats['total_file_val']:,.0f}")
-        c5.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
-        c6.metric("States Covered", stats["states"])
+        c3.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
+        c4.metric("States Covered", stats["states"])
 
         # Deal pipeline summary
         if stats["deals"]:
@@ -394,7 +390,7 @@ elif page == "Top Targets":
             display_df.insert(
                 display_df.columns.get_loc("estimated_rx_volume") + 1,
                 "monthly_scripts",
-                (display_df["estimated_rx_volume"] / 12).astype("Int64"),
+                (display_df["estimated_rx_volume"] / 12).apply(lambda x: int(x) if pd.notna(x) else None),
             )
         if "contact_email" in display_df.columns:
             display_df["contact_email"] = display_df["contact_email"].fillna("")
@@ -596,7 +592,7 @@ elif page == "Tuck-in Finder":
                     disp.insert(
                         disp.columns.get_loc("estimated_rx_volume") + 1,
                         "monthly_scripts",
-                        (disp["estimated_rx_volume"] / 12).astype("Int64"),
+                        (disp["estimated_rx_volume"] / 12).apply(lambda x: int(x) if pd.notna(x) else None),
                     )
                 if "acquisition_score" in disp.columns:
                     disp["acquisition_score"] = disp["acquisition_score"].round(1)
@@ -689,7 +685,7 @@ elif page == "Directory":
             disp.insert(
                 disp.columns.get_loc("estimated_rx_volume") + 1,
                 "monthly_scripts",
-                (disp["estimated_rx_volume"] / 12).astype("Int64"),
+                (disp["estimated_rx_volume"] / 12).apply(lambda x: int(x) if pd.notna(x) else None),
             )
         if "acquisition_score" in disp.columns:
             disp["acquisition_score"] = disp["acquisition_score"].round(1)
