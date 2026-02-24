@@ -86,7 +86,10 @@ def init_db():
             market_demand_score REAL, acquisition_score REAL,
             estimated_rx_volume INTEGER, estimated_file_value INTEGER,
             contact_email TEXT, contact_notes TEXT,
-            deal_status TEXT DEFAULT 'Not Contacted'
+            deal_status TEXT DEFAULT 'Not Contacted',
+            enumeration_date TEXT, last_update_date TEXT,
+            npi_deactivation_date TEXT, deactivation_reason TEXT,
+            years_in_operation REAL
         );
         CREATE TABLE IF NOT EXISTS pharmacy_changes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,7 +214,7 @@ st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Top Targets", "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map"],
+    ["Dashboard", "Top Targets", "Closing Signals", "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map"],
     label_visibility="collapsed",
 )
 
@@ -510,14 +513,232 @@ elif page == "Top Targets":
 
         | Factor | Weight | Why it matters for file buys |
         |--------|--------|----------------------------|
-        | **Est. Rx Volume** | 35% | More scripts = more valuable file |
-        | **Low Competition** | 25% | Easier to retain patients at your store |
+        | **Est. Rx Volume** | 30% | More scripts = more valuable file |
+        | **Low Competition** | 20% | Easier to retain patients at your store |
         | **Aging Population** | 20% | 65+ patients fill 2-3x more scripts, stickier |
-        | **Income Level** | 10% | Better payer mix = higher value per script |
-        | **Pop Growth** | 10% | Growing market = file value appreciates |
+        | **Retirement Risk** | 15% | 25+ yr pharmacies = owner likely near retirement |
+        | **Income Level** | 8% | Better payer mix = higher value per script |
+        | **Pop Growth** | 7% | Growing market = file value appreciates |
 
         **Est. File Value** = Est. Scripts/Year x $4/script (industry standard for file purchases)
+
+        **Retirement Risk** is based on how long the pharmacy has been operating (from NPI enumeration date).
+        Pharmacies open 25+ years score highest — the owner is likely 60+ and approaching retirement.
         """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLOSING SIGNALS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Closing Signals":
+    st.title("Closing Signals")
+    st.caption("Pharmacies showing signs of closing or retirement — prime file acquisition targets.")
+
+    conn = get_db()
+
+    # Check if date columns are populated
+    has_dates = conn.execute("SELECT COUNT(*) FROM pharmacies WHERE enumeration_date IS NOT NULL").fetchone()[0]
+
+    if has_dates == 0:
+        st.warning("Date fields not yet populated. Run `python extract_npi_dates.py` from the M&A dash folder first.")
+        conn.close()
+    else:
+        # Top metrics
+        long_tenured = conn.execute(
+            "SELECT COUNT(*) FROM pharmacies WHERE years_in_operation >= 20 AND is_independent = 1"
+        ).fetchone()[0]
+        stale_records = conn.execute("""
+            SELECT COUNT(*) FROM pharmacies
+            WHERE is_independent = 1
+              AND last_update_date IS NOT NULL
+              AND last_update_date < date('now', '-3 years')
+        """).fetchone()[0]
+        recent_deactivated = conn.execute("""
+            SELECT COUNT(*) FROM pharmacies
+            WHERE npi_deactivation_date IS NOT NULL
+              AND npi_deactivation_date >= date('now', '-12 months')
+        """).fetchone()[0]
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Long-Tenured (20+ yrs)", f"{long_tenured:,}")
+        mc2.metric("Stale Records (3+ yrs)", f"{stale_records:,}")
+        mc3.metric("Deactivated (last 12 mo)", f"{recent_deactivated:,}")
+
+        st.divider()
+
+        # Filters
+        fcol1, fcol2, fcol3 = st.columns(3)
+        with fcol1:
+            all_states = get_all_states()
+            cs_state_options = ["All States"] + [s for s, c in all_states]
+            cs_state = st.selectbox("State", cs_state_options, key="cs_state")
+            cs_state_filter = cs_state if cs_state != "All States" else ""
+        with fcol2:
+            signal_filter = st.selectbox("Signal Type", [
+                "All Signals", "Long-Tenured (20+ yrs)", "Stale Record (3+ yrs)", "Deactivated Nearby"
+            ], key="cs_signal")
+        with fcol3:
+            cs_search = st.text_input("Search", placeholder="Name, city...", key="cs_search")
+
+        # Build query based on signal filter
+        conditions = ["is_independent = 1"]
+        params = []
+
+        if cs_state_filter:
+            conditions.append("state = ?")
+            params.append(cs_state_filter)
+        if cs_search:
+            conditions.append("(organization_name LIKE ? OR city LIKE ?)")
+            params.extend([f"%{cs_search}%", f"%{cs_search}%"])
+
+        if signal_filter == "Long-Tenured (20+ yrs)":
+            conditions.append("years_in_operation >= 20")
+        elif signal_filter == "Stale Record (3+ yrs)":
+            conditions.append("last_update_date IS NOT NULL AND last_update_date < date('now', '-3 years')")
+        elif signal_filter == "Deactivated Nearby":
+            # Find ZIPs with recently deactivated pharmacies
+            deact_zips = conn.execute("""
+                SELECT DISTINCT zip FROM pharmacies
+                WHERE npi_deactivation_date IS NOT NULL
+                  AND npi_deactivation_date >= date('now', '-12 months')
+                  AND zip IS NOT NULL
+            """).fetchall()
+            deact_zip_list = [r[0] for r in deact_zips]
+            if deact_zip_list:
+                placeholders = ",".join(["?"] * len(deact_zip_list))
+                conditions.append(f"zip IN ({placeholders})")
+                conditions.append("npi_deactivation_date IS NULL")  # Show active ones in those ZIPs
+                params.extend(deact_zip_list)
+            else:
+                conditions.append("1=0")  # No results
+        else:
+            # All signals: show pharmacies that have ANY signal
+            conditions.append("""(
+                years_in_operation >= 20
+                OR (last_update_date IS NOT NULL AND last_update_date < date('now', '-3 years'))
+                OR zip IN (
+                    SELECT DISTINCT zip FROM pharmacies
+                    WHERE npi_deactivation_date IS NOT NULL
+                      AND npi_deactivation_date >= date('now', '-12 months')
+                      AND zip IS NOT NULL
+                )
+            )""")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        # Pagination
+        if "cs_page" not in st.session_state:
+            st.session_state.cs_page = 1
+        per_page = 50
+        offset = (st.session_state.cs_page - 1) * per_page
+
+        total = conn.execute(f"SELECT COUNT(*) FROM pharmacies {where}", params).fetchone()[0]
+        total_pages = max(1, (total + per_page - 1) // per_page)
+
+        rows = conn.execute(f"""
+            SELECT id, organization_name, city, state, phone,
+                   estimated_rx_volume,
+                   CASE WHEN estimated_rx_volume IS NOT NULL
+                        THEN CAST(estimated_rx_volume / 12 AS INTEGER) ELSE NULL END as monthly_scripts,
+                   estimated_file_value, years_in_operation, last_update_date,
+                   npi_deactivation_date, ROUND(acquisition_score, 1) as score
+            FROM pharmacies {where}
+            ORDER BY acquisition_score DESC NULLS LAST
+            LIMIT ? OFFSET ?
+        """, params + [per_page, offset]).fetchall()
+
+        # Precompute deactivated ZIPs for signal tagging
+        deact_zip_set = set()
+        dz_rows = conn.execute("""
+            SELECT DISTINCT zip FROM pharmacies
+            WHERE npi_deactivation_date IS NOT NULL
+              AND npi_deactivation_date >= date('now', '-12 months')
+              AND zip IS NOT NULL
+        """).fetchall()
+        deact_zip_set = {r[0] for r in dz_rows}
+
+        # Also need ZIP for signal tagging
+        zip_lookup = {}
+        if rows:
+            ids = [r[0] for r in rows]
+            placeholders = ",".join(["?"] * len(ids))
+            zip_rows = conn.execute(
+                f"SELECT id, zip FROM pharmacies WHERE id IN ({placeholders})", ids
+            ).fetchall()
+            zip_lookup = {r[0]: r[1] for r in zip_rows}
+
+        conn.close()
+
+        col_info, col_export = st.columns([3, 1])
+        with col_info:
+            st.caption(f"**{total:,}** pharmacies with closing signals — Page {st.session_state.cs_page} of {total_pages}")
+
+        if rows:
+            data = []
+            for r in rows:
+                pid, name, city, state, phone, rx_vol, monthly, file_val, years_op, last_upd, deact, score = r
+
+                # Determine signals
+                signals = []
+                if years_op and years_op >= 20:
+                    signals.append("Long-Tenured")
+                if last_upd and last_upd < (datetime.now().replace(year=datetime.now().year - 3)).strftime("%Y-%m-%d"):
+                    signals.append("Stale Record")
+                pharmacy_zip = zip_lookup.get(pid, "")
+                if pharmacy_zip in deact_zip_set and not deact:
+                    signals.append("Deactivated Nearby")
+
+                signal_str = ", ".join(signals) if signals else "—"
+
+                data.append({
+                    "Name": name,
+                    "City": city,
+                    "ST": state,
+                    "Scripts/Mo": f"{monthly:,}" if monthly else "—",
+                    "Phone": phone or "—",
+                    "File Value": f"${file_val:,}" if file_val else "—",
+                    "Years Open": f"{years_op:.0f}" if years_op else "—",
+                    "Last Updated": last_upd or "—",
+                    "Signal": signal_str,
+                    "Score": score if score else "—",
+                })
+
+            display_df = pd.DataFrame(data)
+            st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
+
+            # Export
+            with col_export:
+                st.download_button("Export Signals List",
+                                   display_df.to_csv(index=False),
+                                   file_name="closing_signals.csv", mime="text/csv")
+
+            # Pagination
+            if total_pages > 1:
+                col_prev, _, col_next = st.columns([1, 2, 1])
+                with col_prev:
+                    if st.button("← Previous", disabled=st.session_state.cs_page <= 1, key="csp"):
+                        st.session_state.cs_page -= 1
+                        st.rerun()
+                with col_next:
+                    if st.button("Next →", disabled=st.session_state.cs_page >= total_pages, key="csn"):
+                        st.session_state.cs_page += 1
+                        st.rerun()
+        else:
+            st.info("No pharmacies match the selected signal filter.")
+
+        with st.expander("What are Closing Signals?"):
+            st.markdown("""
+            These signals help identify pharmacies whose owners may be ready to sell their prescription files:
+
+            | Signal | What it means | Why it matters |
+            |--------|--------------|----------------|
+            | **Long-Tenured** | Open 20+ years | Owner likely near retirement age (60+) |
+            | **Stale Record** | NPI not updated in 3+ years | Disengaged owner, not investing in the business |
+            | **Deactivated Nearby** | Another pharmacy in same ZIP recently closed | Displaced patients looking for a new pharmacy = opportunity |
+
+            These signals are derived from NPI registration data (enumeration date, last update date, and deactivation records).
+            """)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
