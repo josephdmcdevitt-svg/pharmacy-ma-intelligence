@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pharmacy_intel
+      POSTGRES_USER: ${DB_USER:-pharmacy}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme123}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-pharmacy} -d pharmacy_intel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-pharmacy}:${DB_PASSWORD:-changeme123}@db:5432/pharmacy_intel
+      DATABASE_URL_SYNC: postgresql://${DB_USER:-pharmacy}:${DB_PASSWORD:-changeme123}@db:5432/pharmacy_intel
+      SECRET_KEY: ${SECRET_KEY:-devsecretkey_change_in_production}
+      DATA_DIR: /app/data
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@pharma.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

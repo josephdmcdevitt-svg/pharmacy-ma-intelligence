@@ -1,0 +1,21 @@
+# Data files (too large for GitHub)
+data/*.csv
+data/*.zip
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# OS
+.DS_Store
+
+# Node (frontend build artifacts)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Docker volumes
+pgdata/
