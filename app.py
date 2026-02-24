@@ -219,7 +219,8 @@ st.sidebar.divider()
 stats = get_stats()
 if stats["total"] > 0:
     st.sidebar.metric("Independent Pharmacies", f"{stats['independent']:,}")
-    st.sidebar.metric("Total Est. Scripts", f"{stats['total_rx']:,.0f}")
+    st.sidebar.metric("Est. Scripts/Year", f"{stats['total_rx']:,.0f}")
+    st.sidebar.metric("Est. Scripts/Month", f"{stats['total_rx'] / 12:,.0f}")
     st.sidebar.metric("Total Est. File Value", f"${stats['total_file_val']:,.0f}")
 
 
@@ -236,12 +237,13 @@ if page == "Dashboard":
         import plotly.express as px
 
         # Row 1: Key metrics
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Independent Targets", f"{stats['independent']:,}")
-        c2.metric("Est. Total Scripts/Yr", f"{stats['total_rx']:,.0f}")
-        c3.metric("Est. Total File Value", f"${stats['total_file_val']:,.0f}")
-        c4.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
-        c5.metric("States Covered", stats["states"])
+        c2.metric("Scripts/Year", f"{stats['total_rx']:,.0f}")
+        c3.metric("Scripts/Month", f"{stats['total_rx'] / 12:,.0f}")
+        c4.metric("Est. Total File Value", f"${stats['total_file_val']:,.0f}")
+        c5.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
+        c6.metric("States Covered", stats["states"])
 
         # Deal pipeline summary
         if stats["deals"]:
@@ -301,8 +303,11 @@ if page == "Dashboard":
         st.subheader("Top 100 File Acquisition Targets")
         conn = get_db()
         top = conn.execute("""
-            SELECT organization_name, city, state, phone, contact_email,
-                   estimated_rx_volume, estimated_file_value,
+            SELECT organization_name, city, state, phone,
+                   COALESCE(contact_email, '') as contact_email,
+                   estimated_rx_volume,
+                   CASE WHEN estimated_rx_volume IS NOT NULL THEN CAST(estimated_rx_volume / 12 AS INTEGER) ELSE NULL END as monthly_scripts,
+                   estimated_file_value,
                    ROUND(acquisition_score, 1) as score,
                    zip_pct_65_plus, deal_status
             FROM pharmacies WHERE acquisition_score IS NOT NULL
@@ -312,11 +317,14 @@ if page == "Dashboard":
         if top:
             top_df = pd.DataFrame([dict(r) for r in top])
             top_df.columns = ["Name", "City", "State", "Phone", "Email",
-                              "Est. Scripts/Yr", "Est. File Value ($)",
+                              "Scripts/Yr", "Scripts/Mo",
+                              "Est. File Value ($)",
                               "Acq Score", "% 65+", "Deal Status"]
             top_df["Est. File Value ($)"] = top_df["Est. File Value ($)"].apply(
                 lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
-            top_df["Est. Scripts/Yr"] = top_df["Est. Scripts/Yr"].apply(
+            top_df["Scripts/Yr"] = top_df["Scripts/Yr"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+            top_df["Scripts/Mo"] = top_df["Scripts/Mo"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
             if "% 65+" in top_df.columns:
                 top_df["% 65+"] = top_df["% 65+"].round(1)
@@ -381,6 +389,15 @@ elif page == "Top Targets":
                         "zip_pct_65_plus", "zip_pharmacy_count", "deal_status"]
         display_cols = [c for c in display_cols if c in df.columns]
         display_df = df[display_cols].copy()
+        # Add monthly scripts column
+        if "estimated_rx_volume" in display_df.columns:
+            display_df.insert(
+                display_df.columns.get_loc("estimated_rx_volume") + 1,
+                "monthly_scripts",
+                (display_df["estimated_rx_volume"] / 12).astype("Int64"),
+            )
+        if "contact_email" in display_df.columns:
+            display_df["contact_email"] = display_df["contact_email"].fillna("")
         if "acquisition_score" in display_df.columns:
             display_df["acquisition_score"] = display_df["acquisition_score"].round(1)
         if "estimated_file_value" in display_df.columns:
@@ -389,11 +406,15 @@ elif page == "Top Targets":
         if "estimated_rx_volume" in display_df.columns:
             display_df["estimated_rx_volume"] = display_df["estimated_rx_volume"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+        if "monthly_scripts" in display_df.columns:
+            display_df["monthly_scripts"] = display_df["monthly_scripts"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
         if "zip_pct_65_plus" in display_df.columns:
             display_df["zip_pct_65_plus"] = display_df["zip_pct_65_plus"].round(1)
 
         rename = {"organization_name": "Name", "city": "City", "state": "ST", "phone": "Phone",
-                  "contact_email": "Email", "estimated_rx_volume": "Est. Scripts/Yr",
+                  "contact_email": "Email", "estimated_rx_volume": "Scripts/Yr",
+                  "monthly_scripts": "Scripts/Mo",
                   "estimated_file_value": "Est. File Value", "acquisition_score": "Score",
                   "zip_pct_65_plus": "% 65+", "zip_pharmacy_count": "Pharmacies in ZIP",
                   "deal_status": "Status"}
@@ -413,33 +434,56 @@ elif page == "Top Targets":
                 st.subheader(detail["organization_name"])
 
                 # File value metrics
-                fc1, fc2, fc3, fc4 = st.columns(4)
-                fc1.metric("Est. Scripts/Year", fmt(detail.get("estimated_rx_volume")))
-                fc2.metric("Est. File Value", fmt(detail.get("estimated_file_value"), prefix="$"))
-                fc3.metric("Acq. Score", f"{score:.1f}/100" if score else "—")
-                fc4.metric("Pharmacies in ZIP", detail.get("zip_pharmacy_count", "—"))
+                fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+                fc1.metric("Scripts/Year", fmt(detail.get("estimated_rx_volume")))
+                monthly = int(detail["estimated_rx_volume"] / 12) if detail.get("estimated_rx_volume") else None
+                fc2.metric("Scripts/Month", fmt(monthly))
+                fc3.metric("Est. File Value", fmt(detail.get("estimated_file_value"), prefix="$"))
+                fc4.metric("Acq. Score", f"{score:.1f}/100" if score else "—")
+                fc5.metric("Pharmacies in ZIP", detail.get("zip_pharmacy_count", "—"))
 
-                # Details + contact editing
+                # Contact info box (highlighted)
+                st.markdown("---")
+                st.markdown("#### Contact & Outreach")
+                with st.form(f"contact_{pharmacy_id}"):
+                    row1 = st.columns([1, 1, 1, 1])
+                    with row1[0]:
+                        st.markdown(f"**Phone:** {detail.get('phone') or '—'}")
+                        if detail.get("fax"):
+                            st.markdown(f"**Fax:** {detail['fax']}")
+                    with row1[1]:
+                        if detail.get("authorized_official_name"):
+                            st.markdown(f"**Owner:** {detail['authorized_official_name']}")
+                        if detail.get("authorized_official_phone"):
+                            st.markdown(f"**Direct Line:** {detail['authorized_official_phone']}")
+                    with row1[2]:
+                        new_email = st.text_input("Contact Email", value=detail.get("contact_email") or "",
+                                                  placeholder="Enter email address")
+                    with row1[3]:
+                        current_status = detail.get("deal_status") or "Not Contacted"
+                        status_idx = DEAL_STATUSES.index(current_status) if current_status in DEAL_STATUSES else 0
+                        new_status = st.selectbox("Deal Status", DEAL_STATUSES, index=status_idx)
+
+                    new_notes = st.text_area("Notes", value=detail.get("contact_notes") or "",
+                                             height=80, placeholder="Add notes about this target...")
+                    if st.form_submit_button("Save Contact Info", use_container_width=True, type="primary"):
+                        update_pharmacy_contact(pharmacy_id, email=new_email, notes=new_notes, deal_status=new_status)
+                        st.success("Saved!")
+                        st.rerun()
+
+                # Location, Ownership, Market details
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("**Location & Contact**")
+                    st.markdown("**Location**")
                     st.text(detail.get("address_line1") or "")
                     if detail.get("address_line2"):
                         st.text(detail["address_line2"])
                     st.text(f"{detail.get('city', '')}, {detail.get('state', '')} {detail.get('zip', '')}")
-                    if detail.get("phone"):
-                        st.text(f"Phone: {detail['phone']}")
-                    if detail.get("fax"):
-                        st.text(f"Fax: {detail['fax']}")
 
                 with c2:
                     st.markdown("**Ownership**")
-                    if detail.get("authorized_official_name"):
-                        st.text(f"Owner/Official: {detail['authorized_official_name']}")
                     if detail.get("authorized_official_title"):
                         st.text(f"Title: {detail['authorized_official_title']}")
-                    if detail.get("authorized_official_phone"):
-                        st.text(f"Direct Line: {detail['authorized_official_phone']}")
                     st.text(f"Entity: {detail.get('ownership_type', 'N/A')}")
                     st.text(f"NPI: {detail['npi']}")
 
@@ -450,24 +494,6 @@ elif page == "Top Targets":
                     st.text(f"Income: {fmt(detail.get('zip_median_income'), prefix='$')}")
                     st.text(f"Pop Growth: {detail.get('zip_pop_growth_pct', '—')}%")
                     st.text(f"Medicare Claims (ZIP): {fmt(detail.get('zip_medicare_claims'))}")
-
-                # Editable contact section
-                st.markdown("---")
-                st.markdown("**Update Contact & Deal Status**")
-                with st.form(f"contact_{pharmacy_id}"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    with ec1:
-                        new_email = st.text_input("Email", value=detail.get("contact_email") or "")
-                    with ec2:
-                        current_status = detail.get("deal_status") or "Not Contacted"
-                        status_idx = DEAL_STATUSES.index(current_status) if current_status in DEAL_STATUSES else 0
-                        new_status = st.selectbox("Deal Status", DEAL_STATUSES, index=status_idx)
-                    with ec3:
-                        new_notes = st.text_area("Notes", value=detail.get("contact_notes") or "", height=80)
-                    if st.form_submit_button("Save", use_container_width=True):
-                        update_pharmacy_contact(pharmacy_id, email=new_email, notes=new_notes, deal_status=new_status)
-                        st.success("Saved!")
-                        st.rerun()
 
         # Pagination
         if total_pages > 1:
@@ -563,6 +589,15 @@ elif page == "Tuck-in Finder":
                                 "authorized_official_name", "deal_status"]
                 display_cols = [c for c in display_cols if c in nearby_df.columns]
                 disp = nearby_df[display_cols].copy()
+                if "contact_email" in disp.columns:
+                    disp["contact_email"] = disp["contact_email"].fillna("")
+                # Add monthly scripts
+                if "estimated_rx_volume" in disp.columns:
+                    disp.insert(
+                        disp.columns.get_loc("estimated_rx_volume") + 1,
+                        "monthly_scripts",
+                        (disp["estimated_rx_volume"] / 12).astype("Int64"),
+                    )
                 if "acquisition_score" in disp.columns:
                     disp["acquisition_score"] = disp["acquisition_score"].round(1)
                 if "estimated_file_value" in disp.columns:
@@ -571,8 +606,11 @@ elif page == "Tuck-in Finder":
                 if "estimated_rx_volume" in disp.columns:
                     disp["estimated_rx_volume"] = disp["estimated_rx_volume"].apply(
                         lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+                if "monthly_scripts" in disp.columns:
+                    disp["monthly_scripts"] = disp["monthly_scripts"].apply(
+                        lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
                 disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email",
-                                "Est. Scripts", "Est. File Value", "Score",
+                                "Scripts/Yr", "Scripts/Mo", "File Value", "Score",
                                 "Owner", "Status"][:len(disp.columns)]
 
                 st.dataframe(disp, use_container_width=True, hide_index=True)
@@ -644,6 +682,15 @@ elif page == "Directory":
         cols = [c for c in cols if c in df.columns]
         disp = df[cols].copy()
         disp["is_independent"] = disp["is_independent"].map({1: "Independent", 0: "Chain"})
+        if "contact_email" in disp.columns:
+            disp["contact_email"] = disp["contact_email"].fillna("")
+        # Add monthly scripts
+        if "estimated_rx_volume" in disp.columns:
+            disp.insert(
+                disp.columns.get_loc("estimated_rx_volume") + 1,
+                "monthly_scripts",
+                (disp["estimated_rx_volume"] / 12).astype("Int64"),
+            )
         if "acquisition_score" in disp.columns:
             disp["acquisition_score"] = disp["acquisition_score"].round(1)
         if "estimated_file_value" in disp.columns:
@@ -652,8 +699,11 @@ elif page == "Directory":
         if "estimated_rx_volume" in disp.columns:
             disp["estimated_rx_volume"] = disp["estimated_rx_volume"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+        if "monthly_scripts" in disp.columns:
+            disp["monthly_scripts"] = disp["monthly_scripts"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
         disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email", "Type",
-                        "Est. Scripts", "File Value", "Score", "Status"][:len(disp.columns)]
+                        "Scripts/Yr", "Scripts/Mo", "File Value", "Score", "Status"][:len(disp.columns)]
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
     if total_pages > 1:
@@ -712,8 +762,11 @@ elif page == "Deal Pipeline":
         for _, row in pipeline_df.iterrows():
             status = row["deal_status"]
             deals = conn.execute("""
-                SELECT id, organization_name, city, state, phone, contact_email,
-                       estimated_rx_volume, estimated_file_value, contact_notes
+                SELECT id, organization_name, city, state, phone,
+                       COALESCE(contact_email, '') as contact_email,
+                       estimated_rx_volume,
+                       CASE WHEN estimated_rx_volume IS NOT NULL THEN CAST(estimated_rx_volume / 12 AS INTEGER) ELSE NULL END as monthly_scripts,
+                       estimated_file_value, contact_notes
                 FROM pharmacies WHERE deal_status = ?
                 ORDER BY estimated_file_value DESC
             """, (status,)).fetchall()
@@ -727,9 +780,12 @@ elif page == "Deal Pipeline":
                 if "estimated_rx_volume" in deals_df.columns:
                     deals_df["estimated_rx_volume"] = deals_df["estimated_rx_volume"].apply(
                         lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+                if "monthly_scripts" in deals_df.columns:
+                    deals_df["monthly_scripts"] = deals_df["monthly_scripts"].apply(
+                        lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
                 deals_df = deals_df.drop(columns=["id"], errors="ignore")
                 deals_df.columns = ["Name", "City", "ST", "Phone", "Email",
-                                    "Est. Scripts", "File Value", "Notes"][:len(deals_df.columns)]
+                                    "Scripts/Yr", "Scripts/Mo", "File Value", "Notes"][:len(deals_df.columns)]
                 st.dataframe(deals_df, use_container_width=True, hide_index=True)
 
     conn.close()
