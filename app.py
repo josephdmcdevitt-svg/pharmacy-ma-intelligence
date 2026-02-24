@@ -218,8 +218,8 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 stats = get_stats()
 if stats["total"] > 0:
-    st.sidebar.metric("Independent Pharmacies", f"{stats['independent']:,}")
-    st.sidebar.metric("Est. Scripts/Year", f"{stats['total_rx']:,.0f}")
+    st.sidebar.metric("Independent Targets", f"{stats['independent']:,}")
+    st.sidebar.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -235,11 +235,16 @@ if page == "Dashboard":
         import plotly.express as px
 
         # Row 1: Key metrics
+        conn_m = get_db()
+        strong_buys = conn_m.execute("SELECT COUNT(*) FROM pharmacies WHERE acquisition_score >= 70 AND is_independent = 1").fetchone()[0]
+        avg_file_val = conn_m.execute("SELECT AVG(estimated_file_value) FROM pharmacies WHERE is_independent = 1 AND estimated_file_value > 0").fetchone()[0] or 0
+        conn_m.close()
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Independent Targets", f"{stats['independent']:,}")
-        c2.metric("Scripts/Year", f"{stats['total_rx']:,.0f}")
+        c2.metric("Strong Buys (70+)", f"{strong_buys:,}")
         c3.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
-        c4.metric("States Covered", stats["states"])
+        c4.metric("Avg File Value/Target", f"${avg_file_val:,.0f}")
 
         # Deal pipeline summary
         if stats["deals"]:
@@ -297,33 +302,32 @@ if page == "Dashboard":
 
         # Top 100 targets
         st.subheader("Top 100 File Acquisition Targets")
+        st.caption("Emails are added manually — click a pharmacy in **Top Targets** to enter contact info.")
         conn = get_db()
         top = conn.execute("""
             SELECT organization_name, city, state, phone,
-                   COALESCE(contact_email, '') as contact_email,
+                   authorized_official_name,
                    estimated_rx_volume,
                    CASE WHEN estimated_rx_volume IS NOT NULL THEN CAST(estimated_rx_volume / 12 AS INTEGER) ELSE NULL END as monthly_scripts,
                    estimated_file_value,
                    ROUND(acquisition_score, 1) as score,
-                   zip_pct_65_plus, deal_status
+                   zip_pharmacy_count, deal_status
             FROM pharmacies WHERE acquisition_score IS NOT NULL
             ORDER BY acquisition_score DESC LIMIT 100
         """).fetchall()
         conn.close()
         if top:
             top_df = pd.DataFrame([dict(r) for r in top])
-            top_df.columns = ["Name", "City", "State", "Phone", "Email",
+            top_df.columns = ["Name", "City", "State", "Phone", "Owner/Official",
                               "Scripts/Yr", "Scripts/Mo",
-                              "Est. File Value ($)",
-                              "Acq Score", "% 65+", "Deal Status"]
-            top_df["Est. File Value ($)"] = top_df["Est. File Value ($)"].apply(
+                              "File Value",
+                              "Score", "Pharmacies in ZIP", "Deal Status"]
+            top_df["File Value"] = top_df["File Value"].apply(
                 lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
             top_df["Scripts/Yr"] = top_df["Scripts/Yr"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
             top_df["Scripts/Mo"] = top_df["Scripts/Mo"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
-            if "% 65+" in top_df.columns:
-                top_df["% 65+"] = top_df["% 65+"].round(1)
             st.dataframe(top_df, use_container_width=True, hide_index=True, height=600)
 
 
