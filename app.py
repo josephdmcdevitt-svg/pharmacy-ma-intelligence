@@ -1,21 +1,17 @@
 """
-Pharmacy Acquisition Intelligence Platform — Streamlit Edition
+Pharmacy File Acquisition Intelligence Platform
 
-M&A intelligence dashboard for pharmacy acquisition targeting.
+M&A intelligence dashboard for prescription file acquisitions.
 Enriched with CMS Medicare data and U.S. Census demographics.
 """
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os
 import re
 import hashlib
-import zipfile
 import time
 from datetime import datetime
 from pathlib import Path
-
-# ─── Configuration ───────────────────────────────────────────────────────────
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -34,11 +30,10 @@ st.set_page_config(
 def check_login():
     if st.session_state.get("authenticated"):
         return True
-
     st.markdown(
         "<div style='max-width:400px;margin:15vh auto;text-align:center'>"
         "<h1>💊 Pharmacy Intel</h1>"
-        "<p style='color:gray'>M&A Intelligence Platform</p></div>",
+        "<p style='color:gray'>Prescription File Acquisition Platform</p></div>",
         unsafe_allow_html=True,
     )
     with st.container():
@@ -56,7 +51,6 @@ def check_login():
                         st.error("Invalid username or password")
     return False
 
-
 if not check_login():
     st.stop()
 
@@ -67,7 +61,6 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
-
 
 def init_db():
     conn = get_db()
@@ -90,7 +83,10 @@ def init_db():
             zip_medicare_claims INTEGER, zip_medicare_cost REAL,
             zip_medicare_beneficiaries INTEGER, zip_pharmacy_count INTEGER,
             zip_pharmacies_per_10k REAL, competition_score REAL,
-            market_demand_score REAL, acquisition_score REAL
+            market_demand_score REAL, acquisition_score REAL,
+            estimated_rx_volume INTEGER, estimated_file_value INTEGER,
+            contact_email TEXT, contact_notes TEXT,
+            deal_status TEXT DEFAULT 'Not Contacted'
         );
         CREATE TABLE IF NOT EXISTS pharmacy_changes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,11 +103,9 @@ def init_db():
     """)
     conn.close()
 
-
 init_db()
 
-
-# ─── Helper Queries ──────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def get_stats():
     conn = get_db()
@@ -119,32 +113,38 @@ def get_stats():
     independent = conn.execute("SELECT COUNT(*) FROM pharmacies WHERE is_independent = 1").fetchone()[0]
     chain = conn.execute("SELECT COUNT(*) FROM pharmacies WHERE is_chain = 1").fetchone()[0]
     states = conn.execute("SELECT COUNT(DISTINCT state) FROM pharmacies WHERE state IS NOT NULL").fetchone()[0]
-    scored = conn.execute("SELECT COUNT(*) FROM pharmacies WHERE acquisition_score IS NOT NULL").fetchone()[0]
     avg_score = conn.execute("SELECT AVG(acquisition_score) FROM pharmacies WHERE acquisition_score IS NOT NULL").fetchone()[0]
+    total_rx = conn.execute("SELECT SUM(estimated_rx_volume) FROM pharmacies WHERE is_independent = 1").fetchone()[0]
+    total_file_val = conn.execute("SELECT SUM(estimated_file_value) FROM pharmacies WHERE is_independent = 1").fetchone()[0]
+    deal_counts = {}
+    for row in conn.execute("SELECT deal_status, COUNT(*) as c FROM pharmacies WHERE deal_status IS NOT NULL AND deal_status != 'Not Contacted' GROUP BY deal_status").fetchall():
+        deal_counts[row["deal_status"]] = row["c"]
     conn.close()
     return {
         "total": total, "independent": independent, "chain": chain,
-        "states": states, "scored": scored, "avg_score": avg_score or 0,
+        "states": states, "avg_score": avg_score or 0,
+        "total_rx": total_rx or 0, "total_file_val": total_file_val or 0,
+        "deals": deal_counts,
     }
 
+def fmt(val, prefix="", suffix=""):
+    if val is None: return "—"
+    return f"{prefix}{int(val):,}{suffix}"
 
-def get_top_states(limit=15, independent_only=False):
+def get_all_states():
     conn = get_db()
-    where = "WHERE state IS NOT NULL" + (" AND is_independent = 1" if independent_only else "")
     rows = conn.execute(
-        f"SELECT state, COUNT(*) as cnt FROM pharmacies {where} "
-        f"GROUP BY state ORDER BY cnt DESC LIMIT ?", (limit,)
+        "SELECT state, COUNT(*) as cnt FROM pharmacies WHERE state IS NOT NULL AND is_independent = 1 "
+        "GROUP BY state ORDER BY state"
     ).fetchall()
     conn.close()
-    return pd.DataFrame([dict(r) for r in rows], columns=["state", "cnt"])
-
+    return [(r["state"], r["cnt"]) for r in rows]
 
 def search_pharmacies(search="", state="", city="", zip_code="", independent_only=False,
-                      min_score=0, sort_by="organization_name", page=1, per_page=50):
+                      min_score=0, sort_by="acquisition_score", page=1, per_page=50):
     conn = get_db()
     conditions = []
     params = []
-
     if search:
         conditions.append("(organization_name LIKE ? OR dba_name LIKE ? OR city LIKE ? OR npi LIKE ?)")
         like = f"%{search}%"
@@ -163,29 +163,25 @@ def search_pharmacies(search="", state="", city="", zip_code="", independent_onl
     if min_score > 0:
         conditions.append("acquisition_score >= ?")
         params.append(min_score)
-
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     offset = (page - 1) * per_page
-
     order_map = {
-        "organization_name": "organization_name ASC",
         "acquisition_score": "acquisition_score DESC",
-        "zip_medicare_claims": "zip_medicare_claims DESC",
-        "zip_pct_65_plus": "zip_pct_65_plus DESC",
+        "estimated_rx_volume": "estimated_rx_volume DESC",
+        "estimated_file_value": "estimated_file_value DESC",
+        "organization_name": "organization_name ASC",
         "competition_score": "competition_score DESC",
+        "zip_pct_65_plus": "zip_pct_65_plus DESC",
         "zip_median_income": "zip_median_income DESC",
     }
-    order = order_map.get(sort_by, "organization_name ASC")
-
+    order = order_map.get(sort_by, "acquisition_score DESC")
     total = conn.execute(f"SELECT COUNT(*) FROM pharmacies {where}", params).fetchone()[0]
     rows = conn.execute(
-        f"SELECT * FROM pharmacies {where} ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT * FROM pharmacies {where} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
         params + [per_page, offset],
     ).fetchall()
     conn.close()
-    df = pd.DataFrame([dict(r) for r in rows])
-    return df, total
-
+    return pd.DataFrame([dict(r) for r in rows]), total
 
 def get_pharmacy_detail(pharmacy_id):
     conn = get_db()
@@ -193,65 +189,38 @@ def get_pharmacy_detail(pharmacy_id):
     conn.close()
     return dict(row) if row else None
 
-
-def get_all_states():
+def update_pharmacy_contact(pharmacy_id, email=None, notes=None, deal_status=None):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT state, COUNT(*) as cnt FROM pharmacies WHERE state IS NOT NULL "
-        "GROUP BY state ORDER BY state"
-    ).fetchall()
+    if email is not None:
+        conn.execute("UPDATE pharmacies SET contact_email = ? WHERE id = ?", (email, pharmacy_id))
+    if notes is not None:
+        conn.execute("UPDATE pharmacies SET contact_notes = ? WHERE id = ?", (notes, pharmacy_id))
+    if deal_status is not None:
+        conn.execute("UPDATE pharmacies SET deal_status = ? WHERE id = ?", (deal_status, pharmacy_id))
+    conn.commit()
     conn.close()
-    return [(r["state"], r["cnt"]) for r in rows]
 
 
-def fmt(val, prefix="", suffix="", decimals=0):
-    """Format a number nicely, return '—' if None."""
-    if val is None:
-        return "—"
-    if decimals > 0:
-        return f"{prefix}{val:,.{decimals}f}{suffix}"
-    return f"{prefix}{int(val):,}{suffix}"
+DEAL_STATUSES = ["Not Contacted", "Researching", "Contacted", "In Discussion", "LOI Sent", "Under Contract", "Closed", "Passed"]
 
-
-def score_color(score):
-    """Return a color for a score value."""
-    if score is None:
-        return "gray"
-    if score >= 70:
-        return "green"
-    if score >= 50:
-        return "orange"
-    return "red"
-
-
-def score_label(score):
-    if score is None:
-        return "—"
-    if score >= 70:
-        return f"🟢 {score:.0f}"
-    if score >= 50:
-        return f"🟡 {score:.0f}"
-    return f"🔴 {score:.0f}"
-
-
-# ─── Sidebar Navigation ─────────────────────────────────────────────────────
+# ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 st.sidebar.markdown("## 💊 Pharmacy Intel")
-st.sidebar.caption("M&A Intelligence Platform")
+st.sidebar.caption("File Acquisition Platform")
 st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Top Targets", "Directory", "Market Map", "Changes"],
+    ["Dashboard", "Top Targets", "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map"],
     label_visibility="collapsed",
 )
 
 st.sidebar.divider()
 stats = get_stats()
 if stats["total"] > 0:
-    st.sidebar.metric("Total Pharmacies", f"{stats['total']:,}")
-    st.sidebar.metric("Independent", f"{stats['independent']:,}")
-    st.sidebar.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}" if stats['avg_score'] else "—")
+    st.sidebar.metric("Independent Pharmacies", f"{stats['independent']:,}")
+    st.sidebar.metric("Total Est. Scripts", f"{stats['total_rx']:,.0f}")
+    st.sidebar.metric("Total Est. File Value", f"${stats['total_file_val']:,.0f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -264,131 +233,94 @@ if page == "Dashboard":
     if stats["total"] == 0:
         st.info("No data loaded. Run the pipeline script first.")
     else:
-        # Row 1: Key stats
+        import plotly.express as px
+
+        # Row 1: Key metrics
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Pharmacies", f"{stats['total']:,}")
-        c2.metric("Independent", f"{stats['independent']:,}")
-        c3.metric("Chain", f"{stats['chain']:,}")
-        c4.metric("States", stats["states"])
-        c5.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
+        c1.metric("Independent Targets", f"{stats['independent']:,}")
+        c2.metric("Est. Total Scripts/Yr", f"{stats['total_rx']:,.0f}")
+        c3.metric("Est. Total File Value", f"${stats['total_file_val']:,.0f}")
+        c4.metric("Avg Acq. Score", f"{stats['avg_score']:.1f}")
+        c5.metric("States Covered", stats["states"])
+
+        # Deal pipeline summary
+        if stats["deals"]:
+            st.divider()
+            st.subheader("Deal Pipeline")
+            deal_cols = st.columns(len(stats["deals"]))
+            for i, (status, count) in enumerate(stats["deals"].items()):
+                deal_cols[i].metric(status, count)
 
         st.divider()
 
-        # Row 2: Charts
-        import plotly.express as px
-
+        # Charts
         col_chart, col_pie = st.columns([2, 1])
 
         with col_chart:
             st.subheader("Independent Pharmacies by State (Top 15)")
-            top_states = get_top_states(15, independent_only=True)
-            if not top_states.empty:
-                fig = px.bar(top_states, x="state", y="cnt",
+            conn = get_db()
+            top_states = conn.execute(
+                "SELECT state, COUNT(*) as cnt FROM pharmacies WHERE state IS NOT NULL AND is_independent = 1 "
+                "GROUP BY state ORDER BY cnt DESC LIMIT 15"
+            ).fetchall()
+            conn.close()
+            if top_states:
+                ts_df = pd.DataFrame([dict(r) for r in top_states])
+                fig = px.bar(ts_df, x="state", y="cnt",
                              labels={"state": "State", "cnt": "Independent Pharmacies"},
                              color_discrete_sequence=["#2563eb"])
                 fig.update_layout(margin=dict(t=10, b=40, l=40, r=10), height=350, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
         with col_pie:
-            st.subheader("Type Breakdown")
-            breakdown = pd.DataFrame({
-                "Type": ["Independent", "Chain"],
-                "Count": [stats["independent"], stats["chain"]],
-            })
-            fig2 = px.pie(breakdown, values="Count", names="Type",
-                          color_discrete_sequence=["#10b981", "#6b7280"], hole=0.4)
-            fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=350)
-            st.plotly_chart(fig2, use_container_width=True)
-
-        # Row 3: Score distribution + Market insights
-        col_scores, col_market = st.columns(2)
-
-        with col_scores:
-            st.subheader("Acquisition Score Distribution")
+            st.subheader("Score Distribution")
             conn = get_db()
             score_dist = conn.execute("""
                 SELECT
                     CASE
-                        WHEN acquisition_score >= 70 THEN '70-100 (Strong Buy)'
-                        WHEN acquisition_score >= 60 THEN '60-70 (Good)'
-                        WHEN acquisition_score >= 50 THEN '50-60 (Average)'
-                        WHEN acquisition_score >= 40 THEN '40-50 (Below Avg)'
-                        ELSE '0-40 (Weak)'
-                    END as bucket,
-                    COUNT(*) as cnt
+                        WHEN acquisition_score >= 70 THEN 'Strong Buy (70+)'
+                        WHEN acquisition_score >= 55 THEN 'Good (55-70)'
+                        WHEN acquisition_score >= 40 THEN 'Average (40-55)'
+                        ELSE 'Below Avg (<40)'
+                    END as bucket, COUNT(*) as cnt
                 FROM pharmacies WHERE acquisition_score IS NOT NULL
-                GROUP BY bucket ORDER BY bucket DESC
+                GROUP BY bucket
             """).fetchall()
             conn.close()
             if score_dist:
-                dist_df = pd.DataFrame([dict(r) for r in score_dist])
-                fig3 = px.bar(dist_df, x="bucket", y="cnt",
-                              labels={"bucket": "Score Range", "cnt": "Pharmacies"},
-                              color="bucket",
-                              color_discrete_map={
-                                  "70-100 (Strong Buy)": "#10b981",
-                                  "60-70 (Good)": "#34d399",
-                                  "50-60 (Average)": "#fbbf24",
-                                  "40-50 (Below Avg)": "#f97316",
-                                  "0-40 (Weak)": "#ef4444",
-                              })
-                fig3.update_layout(margin=dict(t=10, b=40, l=40, r=10), height=300, showlegend=False)
-                st.plotly_chart(fig3, use_container_width=True)
+                sd_df = pd.DataFrame([dict(r) for r in score_dist])
+                fig2 = px.pie(sd_df, values="cnt", names="bucket",
+                              color="bucket", color_discrete_map={
+                                  "Strong Buy (70+)": "#10b981", "Good (55-70)": "#34d399",
+                                  "Average (40-55)": "#fbbf24", "Below Avg (<40)": "#ef4444",
+                              }, hole=0.4)
+                fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=350)
+                st.plotly_chart(fig2, use_container_width=True)
 
-        with col_market:
-            st.subheader("Market Insights")
-            conn = get_db()
-            insights = conn.execute("""
-                SELECT
-                    AVG(zip_pct_65_plus) as avg_aging,
-                    AVG(zip_median_income) as avg_income,
-                    AVG(zip_pop_growth_pct) as avg_growth,
-                    AVG(zip_pharmacies_per_10k) as avg_competition,
-                    AVG(zip_medicare_claims) as avg_medicare
-                FROM pharmacies WHERE is_independent = 1 AND zip_population IS NOT NULL
-            """).fetchone()
-            conn.close()
-
-            if insights:
-                st.metric("Avg Population 65+", f"{insights['avg_aging']:.1f}%" if insights['avg_aging'] else "—")
-                st.metric("Avg ZIP Median Income", fmt(insights['avg_income'], prefix="$"))
-                st.metric("Avg ZIP Pop Growth", f"{insights['avg_growth']:.1f}%" if insights['avg_growth'] else "—")
-                st.metric("Avg Pharmacies per 10K", f"{insights['avg_competition']:.1f}" if insights['avg_competition'] else "—")
-                st.metric("Avg ZIP Medicare Claims", fmt(insights['avg_medicare']))
-
-        # Row 4: Top chains + top targets preview
-        col_chains, col_top = st.columns(2)
-
-        with col_chains:
-            st.subheader("Top Chain Parents")
-            conn = get_db()
-            chains = conn.execute(
-                "SELECT chain_parent, COUNT(*) as cnt FROM pharmacies "
-                "WHERE chain_parent IS NOT NULL GROUP BY chain_parent ORDER BY cnt DESC LIMIT 10"
-            ).fetchall()
-            conn.close()
-            if chains:
-                chain_df = pd.DataFrame([dict(r) for r in chains])
-                chain_df.columns = ["Chain", "Locations"]
-                st.dataframe(chain_df, use_container_width=True, hide_index=True)
-
-        with col_top:
-            st.subheader("Top 100 Acquisition Targets")
-            conn = get_db()
-            top_targets = conn.execute("""
-                SELECT organization_name, city, state, phone,
-                       ROUND(acquisition_score, 1) as score,
-                       ROUND(competition_score, 0) as comp,
-                       zip_pct_65_plus as aging
-                FROM pharmacies
-                WHERE acquisition_score IS NOT NULL
-                ORDER BY acquisition_score DESC LIMIT 100
-            """).fetchall()
-            conn.close()
-            if top_targets:
-                target_df = pd.DataFrame([dict(r) for r in top_targets])
-                target_df.columns = ["Name", "City", "State", "Phone", "Acq Score", "Competition", "% 65+"]
-                st.dataframe(target_df, use_container_width=True, hide_index=True, height=400)
+        # Top 100 targets
+        st.subheader("Top 100 File Acquisition Targets")
+        conn = get_db()
+        top = conn.execute("""
+            SELECT organization_name, city, state, phone, contact_email,
+                   estimated_rx_volume, estimated_file_value,
+                   ROUND(acquisition_score, 1) as score,
+                   zip_pct_65_plus, deal_status
+            FROM pharmacies WHERE acquisition_score IS NOT NULL
+            ORDER BY acquisition_score DESC LIMIT 100
+        """).fetchall()
+        conn.close()
+        if top:
+            top_df = pd.DataFrame([dict(r) for r in top])
+            top_df.columns = ["Name", "City", "State", "Phone", "Email",
+                              "Est. Scripts/Yr", "Est. File Value ($)",
+                              "Acq Score", "% 65+", "Deal Status"]
+            top_df["Est. File Value ($)"] = top_df["Est. File Value ($)"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
+            top_df["Est. Scripts/Yr"] = top_df["Est. Scripts/Yr"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+            if "% 65+" in top_df.columns:
+                top_df["% 65+"] = top_df["% 65+"].round(1)
+            st.dataframe(top_df, use_container_width=True, hide_index=True, height=600)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -396,11 +328,9 @@ if page == "Dashboard":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Top Targets":
-    st.title("Top Acquisition Targets")
-    st.caption("Independent pharmacies ranked by Acquisition Score — combining low competition, "
-               "high Medicare demand, aging population, growth trends, and income levels.")
+    st.title("File Acquisition Targets")
+    st.caption("Independent pharmacies ranked by file value — estimated Rx volume, competition, demographics.")
 
-    # Filters
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         all_states = get_all_states()
@@ -408,16 +338,16 @@ elif page == "Top Targets":
         target_state = st.selectbox("State", state_options, key="target_state")
         target_state_filter = target_state if target_state != "All States" else ""
     with col2:
-        min_score = st.slider("Min Acquisition Score", 0, 100, 50)
+        min_score = st.slider("Min Score", 0, 100, 40)
     with col3:
         target_search = st.text_input("Search", placeholder="Name, city...", key="target_search")
     with col4:
         sort_options = {
             "Acquisition Score": "acquisition_score",
-            "Competition (least)": "competition_score",
-            "Medicare Demand": "zip_medicare_claims",
+            "Est. Rx Volume": "estimated_rx_volume",
+            "Est. File Value": "estimated_file_value",
+            "Low Competition": "competition_score",
             "Aging Population": "zip_pct_65_plus",
-            "Median Income": "zip_median_income",
         }
         sort_label = st.selectbox("Sort by", list(sort_options.keys()))
         sort_by = sort_options[sort_label]
@@ -432,99 +362,112 @@ elif page == "Top Targets":
     )
     total_pages = max(1, (total + 50 - 1) // 50)
 
-    st.caption(f"**{total:,}** targets found — Page {st.session_state.target_page} of {total_pages}")
+    col_info, col_export = st.columns([3, 1])
+    with col_info:
+        st.caption(f"**{total:,}** targets — Page {st.session_state.target_page} of {total_pages}")
+    with col_export:
+        if not df.empty:
+            export_cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+                           "authorized_official_name", "authorized_official_phone",
+                           "estimated_rx_volume", "estimated_file_value", "acquisition_score",
+                           "zip_pct_65_plus", "zip_median_income", "deal_status", "contact_notes"]
+            export_cols = [c for c in export_cols if c in df.columns]
+            st.download_button("Export Outreach List", df[export_cols].to_csv(index=False),
+                               file_name="file_acquisition_targets.csv", mime="text/csv")
 
     if not df.empty:
-        display_cols = ["organization_name", "city", "state", "zip", "phone",
-                        "acquisition_score", "competition_score", "market_demand_score",
-                        "zip_pct_65_plus", "zip_median_income", "zip_pop_growth_pct",
-                        "zip_pharmacy_count"]
+        display_cols = ["organization_name", "city", "state", "phone", "contact_email",
+                        "estimated_rx_volume", "estimated_file_value", "acquisition_score",
+                        "zip_pct_65_plus", "zip_pharmacy_count", "deal_status"]
         display_cols = [c for c in display_cols if c in df.columns]
         display_df = df[display_cols].copy()
+        if "acquisition_score" in display_df.columns:
+            display_df["acquisition_score"] = display_df["acquisition_score"].round(1)
+        if "estimated_file_value" in display_df.columns:
+            display_df["estimated_file_value"] = display_df["estimated_file_value"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
+        if "estimated_rx_volume" in display_df.columns:
+            display_df["estimated_rx_volume"] = display_df["estimated_rx_volume"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+        if "zip_pct_65_plus" in display_df.columns:
+            display_df["zip_pct_65_plus"] = display_df["zip_pct_65_plus"].round(1)
 
-        # Format columns
-        rename = {
-            "organization_name": "Name", "city": "City", "state": "ST", "zip": "ZIP",
-            "acquisition_score": "Acq Score", "competition_score": "Competition",
-            "market_demand_score": "Medicare Demand", "zip_pct_65_plus": "% 65+",
-            "zip_median_income": "Median Income", "zip_pop_growth_pct": "Pop Growth %",
-            "zip_pharmacy_count": "Pharmacies in ZIP", "phone": "Phone",
-        }
+        rename = {"organization_name": "Name", "city": "City", "state": "ST", "phone": "Phone",
+                  "contact_email": "Email", "estimated_rx_volume": "Est. Scripts/Yr",
+                  "estimated_file_value": "Est. File Value", "acquisition_score": "Score",
+                  "zip_pct_65_plus": "% 65+", "zip_pharmacy_count": "Pharmacies in ZIP",
+                  "deal_status": "Status"}
         display_df = display_df.rename(columns=rename)
 
-        # Round scores
-        for col in ["Acq Score", "Competition", "Medicare Demand"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].round(1)
-        if "% 65+" in display_df.columns:
-            display_df["% 65+"] = display_df["% 65+"].round(1)
-        if "Pop Growth %" in display_df.columns:
-            display_df["Pop Growth %"] = display_df["Pop Growth %"].round(1)
-        if "Median Income" in display_df.columns:
-            display_df["Median Income"] = display_df["Median Income"].apply(
-                lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—"
-            )
+        event = st.dataframe(display_df, use_container_width=True, hide_index=True,
+                             on_select="rerun", selection_mode="single-row")
 
-        event = st.dataframe(
-            display_df, use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="single-row",
-        )
-
-        # Detail view on click
+        # Detail + contact edit on click
         if event and event.selection and event.selection.rows:
             selected_idx = event.selection.rows[0]
-            selected_row = df.iloc[selected_idx]
-            pharmacy_id = int(selected_row["id"])
+            pharmacy_id = int(df.iloc[selected_idx]["id"])
             detail = get_pharmacy_detail(pharmacy_id)
             if detail:
                 st.divider()
-
-                # Score badge
                 score = detail.get("acquisition_score")
-                score_text = f"Acquisition Score: **{score:.1f}/100**" if score else "Not scored"
-                st.subheader(f"{detail['organization_name']}")
-                st.caption(score_text)
+                st.subheader(detail["organization_name"])
 
-                # Score breakdown
-                st.markdown("#### Score Breakdown")
-                bc1, bc2, bc3, bc4, bc5 = st.columns(5)
-                bc1.metric("Competition", fmt(detail.get("competition_score"), suffix="/100"),
-                           help="Lower competition in ZIP = higher score")
-                bc2.metric("Medicare Demand", fmt(detail.get("market_demand_score"), suffix="/100"),
-                           help="Medicare prescription volume in area")
-                bc3.metric("Aging Pop", f"{detail.get('zip_pct_65_plus', 0) or 0:.1f}%",
-                           help="% of ZIP population age 65+")
-                bc4.metric("Pop Growth", f"{detail.get('zip_pop_growth_pct', 0) or 0:.1f}%",
-                           help="Population growth since 2019")
-                bc5.metric("Median Income", fmt(detail.get("zip_median_income"), prefix="$"),
-                           help="ZIP code median household income")
+                # File value metrics
+                fc1, fc2, fc3, fc4 = st.columns(4)
+                fc1.metric("Est. Scripts/Year", fmt(detail.get("estimated_rx_volume")))
+                fc2.metric("Est. File Value", fmt(detail.get("estimated_file_value"), prefix="$"))
+                fc3.metric("Acq. Score", f"{score:.1f}/100" if score else "—")
+                fc4.metric("Pharmacies in ZIP", detail.get("zip_pharmacy_count", "—"))
 
-                # Details
+                # Details + contact editing
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("**Location**")
+                    st.markdown("**Location & Contact**")
                     st.text(detail.get("address_line1") or "")
                     if detail.get("address_line2"):
                         st.text(detail["address_line2"])
                     st.text(f"{detail.get('city', '')}, {detail.get('state', '')} {detail.get('zip', '')}")
                     if detail.get("phone"):
                         st.text(f"Phone: {detail['phone']}")
+                    if detail.get("fax"):
+                        st.text(f"Fax: {detail['fax']}")
 
                 with c2:
-                    st.markdown("**Ownership Signals**")
+                    st.markdown("**Ownership**")
                     if detail.get("authorized_official_name"):
-                        st.text(f"Official: {detail['authorized_official_name']}")
+                        st.text(f"Owner/Official: {detail['authorized_official_name']}")
                     if detail.get("authorized_official_title"):
                         st.text(f"Title: {detail['authorized_official_title']}")
+                    if detail.get("authorized_official_phone"):
+                        st.text(f"Direct Line: {detail['authorized_official_phone']}")
                     st.text(f"Entity: {detail.get('ownership_type', 'N/A')}")
                     st.text(f"NPI: {detail['npi']}")
 
                 with c3:
-                    st.markdown("**Market Context**")
-                    st.text(f"ZIP Population: {fmt(detail.get('zip_population'))}")
-                    st.text(f"Pharmacies in ZIP: {detail.get('zip_pharmacy_count', '—')}")
-                    st.text(f"Per 10K pop: {detail.get('zip_pharmacies_per_10k', '—')}")
-                    st.text(f"ZIP Medicare Claims: {fmt(detail.get('zip_medicare_claims'))}")
+                    st.markdown("**Market**")
+                    st.text(f"ZIP Pop: {fmt(detail.get('zip_population'))}")
+                    st.text(f"65+: {detail.get('zip_pct_65_plus', '—')}%")
+                    st.text(f"Income: {fmt(detail.get('zip_median_income'), prefix='$')}")
+                    st.text(f"Pop Growth: {detail.get('zip_pop_growth_pct', '—')}%")
+                    st.text(f"Medicare Claims (ZIP): {fmt(detail.get('zip_medicare_claims'))}")
+
+                # Editable contact section
+                st.markdown("---")
+                st.markdown("**Update Contact & Deal Status**")
+                with st.form(f"contact_{pharmacy_id}"):
+                    ec1, ec2, ec3 = st.columns(3)
+                    with ec1:
+                        new_email = st.text_input("Email", value=detail.get("contact_email") or "")
+                    with ec2:
+                        current_status = detail.get("deal_status") or "Not Contacted"
+                        status_idx = DEAL_STATUSES.index(current_status) if current_status in DEAL_STATUSES else 0
+                        new_status = st.selectbox("Deal Status", DEAL_STATUSES, index=status_idx)
+                    with ec3:
+                        new_notes = st.text_area("Notes", value=detail.get("contact_notes") or "", height=80)
+                    if st.form_submit_button("Save", use_container_width=True):
+                        update_pharmacy_contact(pharmacy_id, email=new_email, notes=new_notes, deal_status=new_status)
+                        st.success("Saved!")
+                        st.rerun()
 
         # Pagination
         if total_pages > 1:
@@ -538,24 +481,114 @@ elif page == "Top Targets":
                     st.session_state.target_page += 1
                     st.rerun()
     else:
-        st.info("No targets found with the selected filters.")
+        st.info("No targets match filters.")
 
-    # Scoring methodology
-    with st.expander("How is the Acquisition Score calculated?"):
+    with st.expander("Scoring Methodology"):
         st.markdown("""
-        The Acquisition Score (0-100) combines five factors weighted for M&A relevance:
+        **Acquisition Score (0-100)** is tuned for prescription file purchases:
 
-        | Factor | Weight | What it measures |
-        |--------|--------|-----------------|
-        | **Competition** | 25% | Fewer pharmacies per capita in the ZIP = higher score |
-        | **Medicare Demand** | 25% | Total Medicare Part D claims prescribed in the ZIP |
-        | **Aging Population** | 20% | % of ZIP population age 65+ (more prescriptions) |
-        | **Population Growth** | 15% | ZIP population change 2019-2024 (growing market) |
-        | **Income Level** | 15% | ZIP median household income (better payer mix) |
+        | Factor | Weight | Why it matters for file buys |
+        |--------|--------|----------------------------|
+        | **Est. Rx Volume** | 35% | More scripts = more valuable file |
+        | **Low Competition** | 25% | Easier to retain patients at your store |
+        | **Aging Population** | 20% | 65+ patients fill 2-3x more scripts, stickier |
+        | **Income Level** | 10% | Better payer mix = higher value per script |
+        | **Pop Growth** | 10% | Growing market = file value appreciates |
 
-        **Data sources:** NPI Registry (CMS), Medicare Part D Prescriber PUF (CMS 2023),
-        American Community Survey 5-Year (Census Bureau 2024)
+        **Est. File Value** = Est. Scripts/Year x $4/script (industry standard for file purchases)
         """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TUCK-IN FINDER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Tuck-in Finder":
+    st.title("Tuck-in Finder")
+    st.caption("Enter your store's ZIP code to find nearby independent pharmacies whose files you can absorb.")
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        my_zip = st.text_input("Your Store ZIP Code", placeholder="e.g. 10001", max_chars=5)
+        radius_option = st.selectbox("Search Radius", ["Same ZIP", "Nearby ZIPs (±2)", "Nearby ZIPs (±5)"])
+        min_rx = st.number_input("Min Est. Scripts/Year", value=5000, step=5000)
+
+    if my_zip and len(my_zip) == 5:
+        conn = get_db()
+
+        if radius_option == "Same ZIP":
+            zip_condition = "zip = ?"
+            zip_params = [my_zip]
+        elif radius_option == "Nearby ZIPs (±2)":
+            try:
+                z = int(my_zip)
+                zips = [str(z + i).zfill(5) for i in range(-2, 3)]
+                zip_condition = f"zip IN ({','.join(['?'] * len(zips))})"
+                zip_params = zips
+            except:
+                zip_condition = "zip = ?"
+                zip_params = [my_zip]
+        else:
+            try:
+                z = int(my_zip)
+                zips = [str(z + i).zfill(5) for i in range(-5, 6)]
+                zip_condition = f"zip IN ({','.join(['?'] * len(zips))})"
+                zip_params = zips
+            except:
+                zip_condition = "zip = ?"
+                zip_params = [my_zip]
+
+        nearby = conn.execute(f"""
+            SELECT * FROM pharmacies
+            WHERE is_independent = 1 AND {zip_condition}
+              AND (estimated_rx_volume >= ? OR estimated_rx_volume IS NULL)
+            ORDER BY estimated_rx_volume DESC
+        """, zip_params + [min_rx]).fetchall()
+        conn.close()
+
+        with col2:
+            if nearby:
+                st.success(f"Found **{len(nearby)}** independent pharmacies near ZIP {my_zip}")
+                nearby_df = pd.DataFrame([dict(r) for r in nearby])
+
+                total_rx = nearby_df["estimated_rx_volume"].sum()
+                total_val = nearby_df["estimated_file_value"].sum()
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("Targets Found", len(nearby))
+                mc2.metric("Total Est. Scripts", f"{total_rx:,.0f}")
+                mc3.metric("Total Est. File Value", f"${total_val:,.0f}")
+
+                display_cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+                                "estimated_rx_volume", "estimated_file_value", "acquisition_score",
+                                "authorized_official_name", "deal_status"]
+                display_cols = [c for c in display_cols if c in nearby_df.columns]
+                disp = nearby_df[display_cols].copy()
+                if "acquisition_score" in disp.columns:
+                    disp["acquisition_score"] = disp["acquisition_score"].round(1)
+                if "estimated_file_value" in disp.columns:
+                    disp["estimated_file_value"] = disp["estimated_file_value"].apply(
+                        lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
+                if "estimated_rx_volume" in disp.columns:
+                    disp["estimated_rx_volume"] = disp["estimated_rx_volume"].apply(
+                        lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+                disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email",
+                                "Est. Scripts", "Est. File Value", "Score",
+                                "Owner", "Status"][:len(disp.columns)]
+
+                st.dataframe(disp, use_container_width=True, hide_index=True)
+
+                # Export
+                st.download_button(
+                    "Export Tuck-in List",
+                    nearby_df[["organization_name", "city", "state", "zip", "phone",
+                               "contact_email", "authorized_official_name",
+                               "estimated_rx_volume", "estimated_file_value",
+                               "acquisition_score", "deal_status"]
+                    ].to_csv(index=False),
+                    file_name=f"tuckin_targets_ZIP_{my_zip}.csv", mime="text/csv",
+                )
+            else:
+                st.warning(f"No independent pharmacies found near ZIP {my_zip} with {min_rx:,}+ scripts.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -563,9 +596,8 @@ elif page == "Top Targets":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Directory":
-    st.title("Pharmacy Directory")
+    st.title("Full Directory")
 
-    # Filters
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         search = st.text_input("Search", placeholder="Name, city, NPI...")
@@ -575,105 +607,132 @@ elif page == "Directory":
         state_sel = st.selectbox("State", state_options)
         state_filter = state_sel.split(" (")[0] if state_sel != "All States" else ""
     with col3:
-        city = st.text_input("City", placeholder="City name")
+        city = st.text_input("City")
     with col4:
-        zip_code = st.text_input("ZIP", placeholder="ZIP or prefix")
+        zip_code = st.text_input("ZIP")
 
     fcol1, fcol2 = st.columns(2)
     with fcol1:
-        independent_only = st.checkbox("Independent pharmacies only", value=False)
+        independent_only = st.checkbox("Independent only", value=True)
     with fcol2:
-        dir_sort = st.selectbox("Sort by", ["Name", "Acquisition Score", "State"],
-                                key="dir_sort")
-        dir_sort_map = {"Name": "organization_name", "Acquisition Score": "acquisition_score",
-                        "State": "organization_name"}
-        dir_sort_by = dir_sort_map[dir_sort]
+        sort_opts = {"Acq. Score": "acquisition_score", "Name": "organization_name",
+                     "Est. Scripts": "estimated_rx_volume", "File Value": "estimated_file_value"}
+        sort_label = st.selectbox("Sort", list(sort_opts.keys()))
 
     if "dir_page" not in st.session_state:
         st.session_state.dir_page = 1
 
-    per_page = 50
     df, total = search_pharmacies(
         search=search, state=state_filter, city=city, zip_code=zip_code,
-        independent_only=independent_only, sort_by=dir_sort_by,
-        page=st.session_state.dir_page, per_page=per_page,
+        independent_only=independent_only, sort_by=sort_opts[sort_label],
+        page=st.session_state.dir_page, per_page=50,
     )
-    total_pages = max(1, (total + per_page - 1) // per_page)
+    total_pages = max(1, (total + 50 - 1) // 50)
 
     col_info, col_export = st.columns([3, 1])
     with col_info:
         st.caption(f"**{total:,}** results — Page {st.session_state.dir_page} of {total_pages}")
     with col_export:
         if not df.empty:
-            csv_data = df.to_csv(index=False)
-            st.download_button("Export CSV", csv_data, file_name="pharmacies_export.csv", mime="text/csv")
+            st.download_button("Export CSV", df.to_csv(index=False),
+                               file_name="pharmacies.csv", mime="text/csv")
 
     if not df.empty:
-        display_cols = ["organization_name", "city", "state", "zip", "phone",
-                        "is_independent", "chain_parent", "npi",
-                        "acquisition_score", "zip_pct_65_plus", "zip_median_income"]
-        display_cols = [c for c in display_cols if c in df.columns]
-        display_df = df[display_cols].copy()
-        display_df["is_independent"] = display_df["is_independent"].map({1: "Independent", 0: "Chain"})
-        if "acquisition_score" in display_df.columns:
-            display_df["acquisition_score"] = display_df["acquisition_score"].round(1)
-        if "zip_pct_65_plus" in display_df.columns:
-            display_df["zip_pct_65_plus"] = display_df["zip_pct_65_plus"].round(1)
-        if "zip_median_income" in display_df.columns:
-            display_df["zip_median_income"] = display_df["zip_median_income"].apply(
-                lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—"
-            )
-        display_df.columns = ["Name", "City", "ST", "ZIP", "Phone", "Type", "Chain",
-                              "NPI", "Acq Score", "% 65+", "Income"][:len(display_df.columns)]
-
-        event = st.dataframe(display_df, use_container_width=True, hide_index=True,
-                             on_select="rerun", selection_mode="single-row")
-
-        if event and event.selection and event.selection.rows:
-            selected_idx = event.selection.rows[0]
-            pharmacy_id = int(df.iloc[selected_idx]["id"])
-            detail = get_pharmacy_detail(pharmacy_id)
-            if detail:
-                st.divider()
-                st.subheader(detail["organization_name"])
-
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.markdown("**Location**")
-                    st.text(detail.get("address_line1") or "")
-                    if detail.get("address_line2"):
-                        st.text(detail["address_line2"])
-                    st.text(f"{detail.get('city', '')}, {detail.get('state', '')} {detail.get('zip', '')}")
-                    if detail.get("phone"):
-                        st.text(f"Phone: {detail['phone']}")
-                with c2:
-                    st.markdown("**Ownership**")
-                    if detail.get("authorized_official_name"):
-                        st.text(f"Official: {detail['authorized_official_name']}")
-                    if detail.get("authorized_official_title"):
-                        st.text(f"Title: {detail['authorized_official_title']}")
-                    st.text(f"Entity: {detail.get('ownership_type', 'N/A')}")
-                    st.text(f"NPI: {detail['npi']}")
-                with c3:
-                    st.markdown("**Market Data**")
-                    st.text(f"Acq Score: {detail.get('acquisition_score', '—')}")
-                    st.text(f"ZIP Pop: {fmt(detail.get('zip_population'))}")
-                    st.text(f"65+: {detail.get('zip_pct_65_plus', '—')}%")
-                    st.text(f"Income: {fmt(detail.get('zip_median_income'), prefix='$')}")
-                    st.text(f"Pharmacies in ZIP: {detail.get('zip_pharmacy_count', '—')}")
-    else:
-        st.info("No pharmacies found. Adjust filters.")
+        cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+                "is_independent", "estimated_rx_volume", "estimated_file_value",
+                "acquisition_score", "deal_status"]
+        cols = [c for c in cols if c in df.columns]
+        disp = df[cols].copy()
+        disp["is_independent"] = disp["is_independent"].map({1: "Independent", 0: "Chain"})
+        if "acquisition_score" in disp.columns:
+            disp["acquisition_score"] = disp["acquisition_score"].round(1)
+        if "estimated_file_value" in disp.columns:
+            disp["estimated_file_value"] = disp["estimated_file_value"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
+        if "estimated_rx_volume" in disp.columns:
+            disp["estimated_rx_volume"] = disp["estimated_rx_volume"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+        disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email", "Type",
+                        "Est. Scripts", "File Value", "Score", "Status"][:len(disp.columns)]
+        st.dataframe(disp, use_container_width=True, hide_index=True)
 
     if total_pages > 1:
-        col_prev, _, col_next = st.columns([1, 2, 1])
-        with col_prev:
-            if st.button("← Previous", disabled=st.session_state.dir_page <= 1, key="dp"):
+        cp, _, cn = st.columns([1, 2, 1])
+        with cp:
+            if st.button("← Prev", disabled=st.session_state.dir_page <= 1, key="dp"):
                 st.session_state.dir_page -= 1
                 st.rerun()
-        with col_next:
+        with cn:
             if st.button("Next →", disabled=st.session_state.dir_page >= total_pages, key="dn"):
                 st.session_state.dir_page += 1
                 st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEAL PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Deal Pipeline":
+    st.title("Deal Pipeline")
+    st.caption("Track your outreach and deal progress across all targets.")
+
+    conn = get_db()
+    pipeline = conn.execute("""
+        SELECT deal_status, COUNT(*) as cnt,
+               SUM(estimated_rx_volume) as total_rx,
+               SUM(estimated_file_value) as total_val
+        FROM pharmacies
+        WHERE deal_status IS NOT NULL AND deal_status != 'Not Contacted'
+        GROUP BY deal_status
+    """).fetchall()
+
+    if not pipeline:
+        st.info("No deals in the pipeline yet. Go to **Top Targets**, click a pharmacy, "
+                "and update its Deal Status to start tracking.")
+    else:
+        # Summary metrics
+        pipeline_df = pd.DataFrame([dict(r) for r in pipeline])
+        total_deals = pipeline_df["cnt"].sum()
+        total_rx = pipeline_df["total_rx"].sum()
+        total_val = pipeline_df["total_val"].sum()
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Active Deals", int(total_deals))
+        mc2.metric("Pipeline Scripts/Yr", f"{total_rx:,.0f}" if total_rx else "0")
+        mc3.metric("Pipeline File Value", f"${total_val:,.0f}" if total_val else "$0")
+
+        # Status breakdown
+        st.subheader("By Status")
+        for _, row in pipeline_df.iterrows():
+            st.markdown(f"**{row['deal_status']}** — {int(row['cnt'])} deals, "
+                        f"{int(row['total_rx'] or 0):,} scripts, "
+                        f"${int(row['total_val'] or 0):,} est. file value")
+
+        # Detail table for each status
+        for _, row in pipeline_df.iterrows():
+            status = row["deal_status"]
+            deals = conn.execute("""
+                SELECT id, organization_name, city, state, phone, contact_email,
+                       estimated_rx_volume, estimated_file_value, contact_notes
+                FROM pharmacies WHERE deal_status = ?
+                ORDER BY estimated_file_value DESC
+            """, (status,)).fetchall()
+
+            if deals:
+                st.markdown(f"#### {status}")
+                deals_df = pd.DataFrame([dict(r) for r in deals])
+                if "estimated_file_value" in deals_df.columns:
+                    deals_df["estimated_file_value"] = deals_df["estimated_file_value"].apply(
+                        lambda x: f"${x:,.0f}" if pd.notna(x) and x else "—")
+                if "estimated_rx_volume" in deals_df.columns:
+                    deals_df["estimated_rx_volume"] = deals_df["estimated_rx_volume"].apply(
+                        lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
+                deals_df = deals_df.drop(columns=["id"], errors="ignore")
+                deals_df.columns = ["Name", "City", "ST", "Phone", "Email",
+                                    "Est. Scripts", "File Value", "Notes"][:len(deals_df.columns)]
+                st.dataframe(deals_df, use_container_width=True, hide_index=True)
+
+    conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -688,95 +747,41 @@ elif page == "Market Map":
         st.info("No data loaded.")
     else:
         map_metric = st.selectbox("Color by", [
-            "Independent Pharmacies",
-            "Avg Acquisition Score",
-            "Avg % Population 65+",
-            "Avg Median Income",
-            "Avg Competition (Pharmacies/10K)",
+            "Independent Pharmacies", "Avg File Value", "Avg Rx Volume",
+            "Avg % Population 65+", "Avg Median Income", "Avg Competition",
         ])
 
         conn = get_db()
-
         metric_map = {
-            "Independent Pharmacies": ("COUNT(*)", "is_independent = 1", "Independent Pharmacies"),
-            "Avg Acquisition Score": ("AVG(acquisition_score)", "acquisition_score IS NOT NULL", "Avg Score"),
+            "Independent Pharmacies": ("COUNT(*)", "is_independent = 1", "Independents"),
+            "Avg File Value": ("AVG(estimated_file_value)", "is_independent = 1 AND estimated_file_value > 0", "Avg File Value ($)"),
+            "Avg Rx Volume": ("AVG(estimated_rx_volume)", "is_independent = 1 AND estimated_rx_volume > 0", "Avg Scripts/Yr"),
             "Avg % Population 65+": ("AVG(zip_pct_65_plus)", "zip_pct_65_plus IS NOT NULL", "Avg % 65+"),
-            "Avg Median Income": ("AVG(zip_median_income)", "zip_median_income IS NOT NULL AND zip_median_income > 0", "Avg Income"),
-            "Avg Competition (Pharmacies/10K)": ("AVG(zip_pharmacies_per_10k)", "zip_pharmacies_per_10k IS NOT NULL", "Pharmacies/10K"),
+            "Avg Median Income": ("AVG(zip_median_income)", "zip_median_income IS NOT NULL AND zip_median_income > 0", "Avg Income ($)"),
+            "Avg Competition": ("AVG(zip_pharmacies_per_10k)", "zip_pharmacies_per_10k IS NOT NULL", "Pharmacies/10K"),
         }
-
         agg, where_clause, label = metric_map[map_metric]
         state_data = conn.execute(f"""
-            SELECT state, {agg} as val
-            FROM pharmacies WHERE state IS NOT NULL AND {where_clause}
+            SELECT state, {agg} as val FROM pharmacies
+            WHERE state IS NOT NULL AND {where_clause}
             GROUP BY state ORDER BY val DESC
         """).fetchall()
         conn.close()
 
         state_df = pd.DataFrame([dict(r) for r in state_data], columns=["state", "val"])
-
         if not state_df.empty:
-            # Choose color scale
-            if "Competition" in map_metric:
-                color_scale = "Reds"  # More = worse
-            elif "Score" in map_metric:
-                color_scale = "Greens"
-            else:
-                color_scale = "Blues"
-
-            fig = px.choropleth(
-                state_df, locations="state", locationmode="USA-states",
-                color="val", scope="usa", color_continuous_scale=color_scale,
-                labels={"val": label, "state": "State"},
-            )
-            fig.update_layout(margin=dict(t=30, b=10, l=10, r=10), height=500,
-                              geo=dict(bgcolor="rgba(0,0,0,0)"))
+            color_scale = "Reds" if "Competition" in map_metric else "Greens" if "File" in map_metric or "Rx" in map_metric else "Blues"
+            fig = px.choropleth(state_df, locations="state", locationmode="USA-states",
+                                color="val", scope="usa", color_continuous_scale=color_scale,
+                                labels={"val": label, "state": "State"})
+            fig.update_layout(margin=dict(t=30, b=10, l=10, r=10), height=500)
             st.plotly_chart(fig, use_container_width=True)
 
-            # State table
-            st.subheader("State Details")
             state_df.columns = ["State", label]
-            if "Income" in label:
+            if "$" in label:
                 state_df[label] = state_df[label].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
-            elif "Score" in label or "65+" in label or "10K" in label:
+            elif "%" in label or "10K" in label:
                 state_df[label] = state_df[label].round(1)
             else:
-                state_df[label] = state_df[label].astype(int)
+                state_df[label] = state_df[label].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "—")
             st.dataframe(state_df, use_container_width=True, hide_index=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CHANGES
-# ═══════════════════════════════════════════════════════════════════════════════
-
-elif page == "Changes":
-    st.title("Change Tracking")
-
-    conn = get_db()
-    total_changes = conn.execute("SELECT COUNT(*) FROM pharmacy_changes").fetchone()[0]
-
-    if total_changes == 0:
-        st.info("No changes detected yet. Changes are tracked between pipeline runs — "
-                "run the pipeline at least twice to see what changed.")
-    else:
-        filter_type = st.selectbox("Filter by type", ["All", "new", "updated", "deactivated"])
-        where = ""
-        params = []
-        if filter_type != "All":
-            where = "WHERE change_type = ?"
-            params = [filter_type]
-
-        changes = conn.execute(
-            f"SELECT * FROM pharmacy_changes {where} ORDER BY detected_at DESC LIMIT 200", params
-        ).fetchall()
-
-        changes_df = pd.DataFrame([dict(r) for r in changes])
-        if not changes_df.empty:
-            display_cols = ["change_type", "npi", "organization_name", "field_changed",
-                            "old_value", "new_value", "detected_at"]
-            display_cols = [c for c in display_cols if c in changes_df.columns]
-            changes_df = changes_df[display_cols]
-            changes_df.columns = [c.replace("_", " ").title() for c in changes_df.columns]
-            st.dataframe(changes_df, use_container_width=True, hide_index=True)
-
-    conn.close()
