@@ -302,7 +302,7 @@ if page == "Dashboard":
 
         # Top 100 targets
         st.subheader("Top 100 File Acquisition Targets")
-        st.caption("Emails are added manually — click a pharmacy in **Top Targets** to enter contact info.")
+        st.caption("Click a pharmacy in **Top Targets** for full details and deal tracking.")
         conn = get_db()
         top = conn.execute("""
             SELECT organization_name, city, state, phone,
@@ -375,7 +375,7 @@ elif page == "Top Targets":
         st.caption(f"**{total:,}** targets — Page {st.session_state.target_page} of {total_pages}")
     with col_export:
         if not df.empty:
-            export_cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+            export_cols = ["organization_name", "city", "state", "zip", "phone",
                            "authorized_official_name", "authorized_official_phone",
                            "estimated_rx_volume", "estimated_file_value", "acquisition_score",
                            "zip_pct_65_plus", "zip_median_income", "deal_status", "contact_notes"]
@@ -384,7 +384,7 @@ elif page == "Top Targets":
                                file_name="file_acquisition_targets.csv", mime="text/csv")
 
     if not df.empty:
-        display_cols = ["organization_name", "city", "state", "phone", "contact_email",
+        display_cols = ["organization_name", "city", "state", "phone",
                         "estimated_rx_volume", "estimated_file_value", "acquisition_score",
                         "zip_pct_65_plus", "zip_pharmacy_count", "deal_status"]
         display_cols = [c for c in display_cols if c in df.columns]
@@ -396,8 +396,6 @@ elif page == "Top Targets":
                 "monthly_scripts",
                 (display_df["estimated_rx_volume"] / 12).apply(lambda x: int(x) if pd.notna(x) else None),
             )
-        if "contact_email" in display_df.columns:
-            display_df["contact_email"] = display_df["contact_email"].fillna("")
         if "acquisition_score" in display_df.columns:
             display_df["acquisition_score"] = display_df["acquisition_score"].round(1)
         if "estimated_file_value" in display_df.columns:
@@ -413,7 +411,7 @@ elif page == "Top Targets":
             display_df["zip_pct_65_plus"] = display_df["zip_pct_65_plus"].round(1)
 
         rename = {"organization_name": "Name", "city": "City", "state": "ST", "phone": "Phone",
-                  "contact_email": "Email", "estimated_rx_volume": "Scripts/Yr",
+                  "estimated_rx_volume": "Scripts/Yr",
                   "monthly_scripts": "Scripts/Mo",
                   "estimated_file_value": "Est. File Value", "acquisition_score": "Score",
                   "zip_pct_65_plus": "% 65+", "zip_pharmacy_count": "Pharmacies in ZIP",
@@ -446,7 +444,7 @@ elif page == "Top Targets":
                 st.markdown("---")
                 st.markdown("#### Contact & Outreach")
                 with st.form(f"contact_{pharmacy_id}"):
-                    row1 = st.columns([1, 1, 1, 1])
+                    row1 = st.columns([1, 1, 1])
                     with row1[0]:
                         st.markdown(f"**Phone:** {detail.get('phone') or '—'}")
                         if detail.get("fax"):
@@ -457,17 +455,14 @@ elif page == "Top Targets":
                         if detail.get("authorized_official_phone"):
                             st.markdown(f"**Direct Line:** {detail['authorized_official_phone']}")
                     with row1[2]:
-                        new_email = st.text_input("Contact Email", value=detail.get("contact_email") or "",
-                                                  placeholder="Enter email address")
-                    with row1[3]:
                         current_status = detail.get("deal_status") or "Not Contacted"
                         status_idx = DEAL_STATUSES.index(current_status) if current_status in DEAL_STATUSES else 0
                         new_status = st.selectbox("Deal Status", DEAL_STATUSES, index=status_idx)
 
                     new_notes = st.text_area("Notes", value=detail.get("contact_notes") or "",
                                              height=80, placeholder="Add notes about this target...")
-                    if st.form_submit_button("Save Contact Info", use_container_width=True, type="primary"):
-                        update_pharmacy_contact(pharmacy_id, email=new_email, notes=new_notes, deal_status=new_status)
+                    if st.form_submit_button("Save", use_container_width=True, type="primary"):
+                        update_pharmacy_contact(pharmacy_id, notes=new_notes, deal_status=new_status)
                         st.success("Saved!")
                         st.rerun()
 
@@ -584,13 +579,11 @@ elif page == "Tuck-in Finder":
                 mc2.metric("Total Est. Scripts", f"{total_rx:,.0f}")
                 mc3.metric("Total Est. File Value", f"${total_val:,.0f}")
 
-                display_cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+                display_cols = ["organization_name", "city", "state", "zip", "phone",
                                 "estimated_rx_volume", "estimated_file_value", "acquisition_score",
                                 "authorized_official_name", "deal_status"]
                 display_cols = [c for c in display_cols if c in nearby_df.columns]
                 disp = nearby_df[display_cols].copy()
-                if "contact_email" in disp.columns:
-                    disp["contact_email"] = disp["contact_email"].fillna("")
                 # Add monthly scripts
                 if "estimated_rx_volume" in disp.columns:
                     disp.insert(
@@ -609,7 +602,7 @@ elif page == "Tuck-in Finder":
                 if "monthly_scripts" in disp.columns:
                     disp["monthly_scripts"] = disp["monthly_scripts"].apply(
                         lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
-                disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email",
+                disp.columns = ["Name", "City", "ST", "ZIP", "Phone",
                                 "Scripts/Yr", "Scripts/Mo", "File Value", "Score",
                                 "Owner", "Status"][:len(disp.columns)]
 
@@ -619,7 +612,7 @@ elif page == "Tuck-in Finder":
                 st.download_button(
                     "Export Tuck-in List",
                     nearby_df[["organization_name", "city", "state", "zip", "phone",
-                               "contact_email", "authorized_official_name",
+                               "authorized_official_name",
                                "estimated_rx_volume", "estimated_file_value",
                                "acquisition_score", "deal_status"]
                     ].to_csv(index=False),
@@ -676,14 +669,12 @@ elif page == "Directory":
                                file_name="pharmacies.csv", mime="text/csv")
 
     if not df.empty:
-        cols = ["organization_name", "city", "state", "zip", "phone", "contact_email",
+        cols = ["organization_name", "city", "state", "zip", "phone",
                 "is_independent", "estimated_rx_volume", "estimated_file_value",
                 "acquisition_score", "deal_status"]
         cols = [c for c in cols if c in df.columns]
         disp = df[cols].copy()
         disp["is_independent"] = disp["is_independent"].map({1: "Independent", 0: "Chain"})
-        if "contact_email" in disp.columns:
-            disp["contact_email"] = disp["contact_email"].fillna("")
         # Add monthly scripts
         if "estimated_rx_volume" in disp.columns:
             disp.insert(
@@ -702,7 +693,7 @@ elif page == "Directory":
         if "monthly_scripts" in disp.columns:
             disp["monthly_scripts"] = disp["monthly_scripts"].apply(
                 lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
-        disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Email", "Type",
+        disp.columns = ["Name", "City", "ST", "ZIP", "Phone", "Type",
                         "Scripts/Yr", "Scripts/Mo", "File Value", "Score", "Status"][:len(disp.columns)]
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
@@ -763,7 +754,6 @@ elif page == "Deal Pipeline":
             status = row["deal_status"]
             deals = conn.execute("""
                 SELECT id, organization_name, city, state, phone,
-                       COALESCE(contact_email, '') as contact_email,
                        estimated_rx_volume,
                        CASE WHEN estimated_rx_volume IS NOT NULL THEN CAST(estimated_rx_volume / 12 AS INTEGER) ELSE NULL END as monthly_scripts,
                        estimated_file_value, contact_notes
@@ -784,7 +774,7 @@ elif page == "Deal Pipeline":
                     deals_df["monthly_scripts"] = deals_df["monthly_scripts"].apply(
                         lambda x: f"{x:,.0f}" if pd.notna(x) and x else "—")
                 deals_df = deals_df.drop(columns=["id"], errors="ignore")
-                deals_df.columns = ["Name", "City", "ST", "Phone", "Email",
+                deals_df.columns = ["Name", "City", "ST", "Phone",
                                     "Scripts/Yr", "Scripts/Mo", "File Value", "Notes"][:len(deals_df.columns)]
                 st.dataframe(deals_df, use_container_width=True, hide_index=True)
 
