@@ -1,8 +1,9 @@
 # Data files (too large for GitHub)
 data/*.csv
 data/*.zip
-*.db
 *.sqlite
+*.db-shm
+*.db-wal
 
 # Python
 __pycache__/
