@@ -214,7 +214,7 @@ st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Top Targets", "Closing Signals", "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map"],
+    ["Dashboard", "Top Targets", "Closing Signals", "Query Tools", "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map"],
     label_visibility="collapsed",
 )
 
@@ -739,6 +739,334 @@ elif page == "Closing Signals":
 
             These signals are derived from NPI registration data (enumeration date, last update date, and deactivation records).
             """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUERY TOOLS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Query Tools":
+    st.title("Query Tools")
+    st.caption("One-click analyses for file acquisition strategy. Pick a query, get results + export.")
+
+    query_choice = st.selectbox("Select a Query", [
+        "Retirement Hotspots",
+        "Underserved Markets",
+        "Best Bang for Buck",
+        "Cold Call Priority List",
+        "Multi-File Clusters",
+    ], key="qt_query")
+
+    conn = get_db()
+
+    # ── Retirement Hotspots ──────────────────────────────────────────────────
+    if query_choice == "Retirement Hotspots":
+        st.subheader("Retirement Hotspots")
+        st.caption("Cities with the most long-tenured (20+ yr) independent pharmacies — cluster buying opportunities.")
+
+        qt_state_options = ["All States"] + [s for s, c in get_all_states()]
+        qt_state = st.selectbox("Filter by State", qt_state_options, key="qt_rh_state")
+
+        state_cond = "AND state = ?" if qt_state != "All States" else ""
+        state_params = [qt_state] if qt_state != "All States" else []
+
+        hotspots = conn.execute(f"""
+            SELECT city, state, COUNT(*) as long_tenured_count,
+                   ROUND(AVG(years_in_operation), 0) as avg_years,
+                   SUM(estimated_file_value) as total_file_value,
+                   SUM(estimated_rx_volume) as total_scripts,
+                   ROUND(AVG(acquisition_score), 1) as avg_score
+            FROM pharmacies
+            WHERE is_independent = 1
+              AND years_in_operation >= 20
+              AND city IS NOT NULL
+              {state_cond}
+            GROUP BY city, state
+            HAVING COUNT(*) >= 2
+            ORDER BY long_tenured_count DESC, total_file_value DESC
+            LIMIT 100
+        """, state_params).fetchall()
+
+        if hotspots:
+            data = []
+            for r in hotspots:
+                data.append({
+                    "City": r[0], "ST": r[1],
+                    "20+ Yr Pharmacies": r[2],
+                    "Avg Years Open": int(r[3]) if r[3] else "—",
+                    "Total File Value": f"${r[4]:,}" if r[4] else "—",
+                    "Total Scripts/Yr": f"{r[5]:,}" if r[5] else "—",
+                    "Avg Score": r[6] if r[6] else "—",
+                })
+            df = pd.DataFrame(data)
+
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Hotspot Cities", len(data))
+            total_targets = sum(r[2] for r in hotspots)
+            mc2.metric("Total Targets", f"{total_targets:,}")
+            total_val = sum(r[4] or 0 for r in hotspots)
+            mc3.metric("Total File Value", f"${total_val:,}")
+
+            st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+            st.download_button("Export Hotspots", df.to_csv(index=False),
+                               file_name="retirement_hotspots.csv", mime="text/csv")
+        else:
+            st.info("No retirement hotspots found with current filters.")
+
+    # ── Underserved Markets ──────────────────────────────────────────────────
+    elif query_choice == "Underserved Markets":
+        st.subheader("Underserved Markets")
+        st.caption("ZIPs where pharmacies recently closed AND the population is aging/growing — displaced patients need a pharmacy.")
+
+        # Find ZIPs with recent deactivations that also have good demographics
+        underserved = conn.execute("""
+            SELECT
+                d.zip,
+                d.deact_count,
+                p.city, p.state,
+                p.zip_population,
+                p.zip_pct_65_plus,
+                p.zip_pop_growth_pct,
+                p.zip_pharmacy_count,
+                active.active_independents,
+                active.total_file_value,
+                active.total_scripts
+            FROM (
+                SELECT zip, COUNT(*) as deact_count
+                FROM pharmacies
+                WHERE npi_deactivation_date IS NOT NULL
+                  AND npi_deactivation_date >= date('now', '-24 months')
+                  AND zip IS NOT NULL
+                GROUP BY zip
+            ) d
+            JOIN pharmacies p ON p.zip = d.zip AND p.id = (
+                SELECT id FROM pharmacies WHERE zip = d.zip AND zip_population IS NOT NULL LIMIT 1
+            )
+            LEFT JOIN (
+                SELECT zip,
+                       COUNT(*) as active_independents,
+                       SUM(estimated_file_value) as total_file_value,
+                       SUM(estimated_rx_volume) as total_scripts
+                FROM pharmacies
+                WHERE is_independent = 1
+                  AND npi_deactivation_date IS NULL
+                GROUP BY zip
+            ) active ON active.zip = d.zip
+            WHERE p.zip_pct_65_plus >= 15 OR p.zip_pop_growth_pct > 0
+            ORDER BY d.deact_count DESC, active.total_file_value DESC
+            LIMIT 100
+        """).fetchall()
+
+        if underserved:
+            data = []
+            for r in underserved:
+                data.append({
+                    "ZIP": r[0], "City": r[2], "ST": r[3],
+                    "Recently Closed": r[1],
+                    "Active Independents": r[8] or 0,
+                    "ZIP Population": f"{r[4]:,}" if r[4] else "—",
+                    "% 65+": r[5] if r[5] else "—",
+                    "Pop Growth %": r[6] if r[6] else "—",
+                    "Active File Value": f"${r[9]:,}" if r[9] else "—",
+                })
+            df = pd.DataFrame(data)
+
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Underserved ZIPs", len(data))
+            mc2.metric("Total Closures (24 mo)", sum(r[1] for r in underserved))
+
+            st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+            st.download_button("Export Underserved Markets", df.to_csv(index=False),
+                               file_name="underserved_markets.csv", mime="text/csv")
+        else:
+            st.info("No underserved markets found (no recent deactivations in aging/growing ZIPs).")
+
+    # ── Best Bang for Buck ───────────────────────────────────────────────────
+    elif query_choice == "Best Bang for Buck":
+        st.subheader("Best Bang for Buck")
+        st.caption("Highest-value files in low-competition areas with closing signals — the best targets to call first.")
+
+        qt_state_options = ["All States"] + [s for s, c in get_all_states()]
+        qt_state = st.selectbox("Filter by State", qt_state_options, key="qt_bb_state")
+        budget = st.number_input("Max File Value Budget ($)", value=500000, step=50000, format="%d")
+
+        state_cond = "AND state = ?" if qt_state != "All States" else ""
+        state_params = [qt_state] if qt_state != "All States" else []
+
+        bang = conn.execute(f"""
+            SELECT organization_name, city, state, phone,
+                   authorized_official_name,
+                   CAST(estimated_rx_volume / 12 AS INTEGER) as monthly_scripts,
+                   estimated_file_value,
+                   ROUND(acquisition_score, 1) as score,
+                   zip_pharmacy_count,
+                   ROUND(years_in_operation, 0) as years_open,
+                   last_update_date,
+                   zip_pct_65_plus
+            FROM pharmacies
+            WHERE is_independent = 1
+              AND estimated_file_value > 0
+              AND estimated_file_value <= ?
+              AND zip_pharmacy_count <= 5
+              AND (years_in_operation >= 20
+                   OR (last_update_date IS NOT NULL AND last_update_date < date('now', '-3 years')))
+              {state_cond}
+            ORDER BY acquisition_score DESC
+            LIMIT 100
+        """, [budget] + state_params).fetchall()
+
+        if bang:
+            data = []
+            for r in bang:
+                data.append({
+                    "Name": r[0], "City": r[1], "ST": r[2], "Phone": r[3] or "—",
+                    "Owner": r[4] or "—",
+                    "Scripts/Mo": f"{r[5]:,}" if r[5] else "—",
+                    "File Value": f"${r[6]:,}" if r[6] else "—",
+                    "Score": r[7],
+                    "Pharmacies in ZIP": r[8],
+                    "Years Open": int(r[9]) if r[9] else "—",
+                    "% 65+": r[11] if r[11] else "—",
+                })
+            df = pd.DataFrame(data)
+
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Targets Found", len(data))
+            total_val = sum(r[6] or 0 for r in bang)
+            mc2.metric("Combined File Value", f"${total_val:,}")
+            total_scripts = sum((r[5] or 0) * 12 for r in bang)
+            mc3.metric("Combined Scripts/Yr", f"{total_scripts:,}")
+
+            st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+            st.download_button("Export Best Targets", df.to_csv(index=False),
+                               file_name="best_bang_for_buck.csv", mime="text/csv")
+        else:
+            st.info("No targets match these criteria. Try increasing budget or removing state filter.")
+
+    # ── Cold Call Priority List ──────────────────────────────────────────────
+    elif query_choice == "Cold Call Priority List":
+        st.subheader("Cold Call Priority List")
+        st.caption("Top 100 most actionable targets: high score + closing signal + phone number. Ready to dial.")
+
+        qt_state_options = ["All States"] + [s for s, c in get_all_states()]
+        qt_state = st.selectbox("Filter by State", qt_state_options, key="qt_cc_state")
+
+        state_cond = "AND state = ?" if qt_state != "All States" else ""
+        state_params = [qt_state] if qt_state != "All States" else []
+
+        calls = conn.execute(f"""
+            SELECT organization_name, city, state, phone,
+                   authorized_official_name, authorized_official_phone,
+                   CAST(estimated_rx_volume / 12 AS INTEGER) as monthly_scripts,
+                   estimated_file_value,
+                   ROUND(acquisition_score, 1) as score,
+                   ROUND(years_in_operation, 0) as years_open,
+                   last_update_date,
+                   deal_status
+            FROM pharmacies
+            WHERE is_independent = 1
+              AND phone IS NOT NULL AND phone != ''
+              AND acquisition_score >= 40
+              AND (years_in_operation >= 20
+                   OR (last_update_date IS NOT NULL AND last_update_date < date('now', '-3 years')))
+              AND (deal_status IS NULL OR deal_status = 'Not Contacted')
+              {state_cond}
+            ORDER BY acquisition_score DESC
+            LIMIT 100
+        """, state_params).fetchall()
+
+        if calls:
+            data = []
+            for r in calls:
+                signals = []
+                if r[9] and r[9] >= 20:
+                    signals.append("Long-Tenured")
+                if r[10] and r[10] < (datetime.now().replace(year=datetime.now().year - 3)).strftime("%Y-%m-%d"):
+                    signals.append("Stale Record")
+                data.append({
+                    "Name": r[0], "City": r[1], "ST": r[2],
+                    "Phone": r[3],
+                    "Owner": r[4] or "—",
+                    "Direct Line": r[5] or "—",
+                    "Scripts/Mo": f"{r[6]:,}" if r[6] else "—",
+                    "File Value": f"${r[7]:,}" if r[7] else "—",
+                    "Score": r[8],
+                    "Signal": ", ".join(signals) or "—",
+                })
+            df = pd.DataFrame(data)
+
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Ready to Call", len(data))
+            total_val = sum(r[7] or 0 for r in calls)
+            mc2.metric("Total Pipeline Value", f"${total_val:,}")
+
+            st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+            st.download_button("Export Call List", df.to_csv(index=False),
+                               file_name="cold_call_priority.csv", mime="text/csv")
+        else:
+            st.info("No un-contacted targets with closing signals found. Adjust state filter or check Deal Pipeline.")
+
+    # ── Multi-File Clusters ──────────────────────────────────────────────────
+    elif query_choice == "Multi-File Clusters":
+        st.subheader("Multi-File Clusters")
+        st.caption("Cities with 3+ independent targets — buy multiple files in one geography for maximum patient capture.")
+
+        qt_state_options = ["All States"] + [s for s, c in get_all_states()]
+        qt_state = st.selectbox("Filter by State", qt_state_options, key="qt_mf_state")
+        min_targets = st.slider("Minimum targets in city", 3, 20, 3, key="qt_mf_min")
+
+        state_cond = "AND state = ?" if qt_state != "All States" else ""
+        state_params = [qt_state] if qt_state != "All States" else []
+
+        clusters = conn.execute(f"""
+            SELECT city, state,
+                   COUNT(*) as target_count,
+                   SUM(estimated_file_value) as total_file_value,
+                   SUM(estimated_rx_volume) as total_scripts,
+                   ROUND(AVG(acquisition_score), 1) as avg_score,
+                   ROUND(AVG(years_in_operation), 0) as avg_years,
+                   SUM(CASE WHEN years_in_operation >= 20 THEN 1 ELSE 0 END) as long_tenured,
+                   MAX(zip_pct_65_plus) as max_65_plus
+            FROM pharmacies
+            WHERE is_independent = 1
+              AND city IS NOT NULL
+              AND estimated_file_value > 0
+              {state_cond}
+            GROUP BY city, state
+            HAVING COUNT(*) >= ?
+            ORDER BY total_file_value DESC
+            LIMIT 100
+        """, state_params + [min_targets]).fetchall()
+
+        if clusters:
+            data = []
+            for r in clusters:
+                data.append({
+                    "City": r[0], "ST": r[1],
+                    "Independents": r[2],
+                    "Total File Value": f"${r[3]:,}" if r[3] else "—",
+                    "Total Scripts/Yr": f"{r[4]:,}" if r[4] else "—",
+                    "Avg Score": r[5],
+                    "Avg Years Open": int(r[6]) if r[6] else "—",
+                    "Long-Tenured": r[7],
+                    "Max % 65+": r[8] if r[8] else "—",
+                })
+            df = pd.DataFrame(data)
+
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Cluster Cities", len(data))
+            total_targets = sum(r[2] for r in clusters)
+            mc2.metric("Total Targets", f"{total_targets:,}")
+            total_val = sum(r[3] or 0 for r in clusters)
+            mc3.metric("Total File Value", f"${total_val:,}")
+
+            st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+            st.download_button("Export Clusters", df.to_csv(index=False),
+                               file_name="multi_file_clusters.csv", mime="text/csv")
+        else:
+            st.info("No clusters found. Try lowering the minimum target count or removing state filter.")
+
+    conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
