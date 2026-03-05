@@ -8,6 +8,7 @@ and HRSA shortage area designations. No estimated or fabricated metrics.
 import json
 import sys
 import os
+import shutil
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -22,11 +23,14 @@ DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # On Streamlit Cloud the repo is read-only, so copy DB to /tmp for writes
-import shutil
 _SOURCE_DB = APP_DIR / "pharmacy_intel.db"
 DB_PATH = Path("/tmp/pharmacy_intel.db")
-if _SOURCE_DB.exists() and not DB_PATH.exists():
-    shutil.copy2(str(_SOURCE_DB), str(DB_PATH))
+if not DB_PATH.exists():
+    if _SOURCE_DB.exists():
+        shutil.copy2(str(_SOURCE_DB), str(DB_PATH))
+    else:
+        # Fallback: use source path directly (local dev)
+        DB_PATH = _SOURCE_DB
 
 st.set_page_config(
     page_title="Pharmacy Acquisition Intelligence",
@@ -450,7 +454,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    st.error(f"Database initialization error: {e}")
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
