@@ -309,35 +309,6 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Authentication ──────────────────────────────────────────────────────────
-
-def check_login():
-    if st.session_state.get("authenticated"):
-        return True
-    st.markdown(
-        "<div style='max-width:400px;margin:15vh auto;text-align:center'>"
-        "<h1>💊 Pharmacy Intel</h1>"
-        "<p style='color:gray'>Acquisition Intelligence Platform</p></div>",
-        unsafe_allow_html=True,
-    )
-    with st.container():
-        col_l, col_form, col_r = st.columns([1, 1, 1])
-        with col_form:
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Sign In", use_container_width=True)
-                if submitted:
-                    if username == "admin" and password == "merger":
-                        st.session_state.authenticated = True
-                        st.rerun()
-                    else:
-                        st.error("Invalid username or password")
-    return False
-
-if not check_login():
-    st.stop()
-
 # ─── Database ────────────────────────────────────────────────────────────────
 
 def get_db():
