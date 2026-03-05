@@ -19,8 +19,14 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
-DB_PATH = APP_DIR / "pharmacy_intel.db"
 DATA_DIR.mkdir(exist_ok=True)
+
+# On Streamlit Cloud the repo is read-only, so copy DB to /tmp for writes
+import shutil
+_SOURCE_DB = APP_DIR / "pharmacy_intel.db"
+DB_PATH = Path("/tmp/pharmacy_intel.db")
+if _SOURCE_DB.exists() and not DB_PATH.exists():
+    shutil.copy2(str(_SOURCE_DB), str(DB_PATH))
 
 st.set_page_config(
     page_title="Pharmacy Acquisition Intelligence",
