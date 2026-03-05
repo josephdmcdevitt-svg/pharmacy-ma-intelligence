@@ -163,60 +163,66 @@ def main():
 
 def recalc_scores(conn):
     """
-    Recalculate acquisition_score using the updated 6-factor model:
-      - Est. Rx Volume: 30%
-      - Low Competition: 20%
-      - Aging Population: 20%
+    Recalculate acquisition_score using real data only:
+      - Medicare Claims: 25%
+      - Competition Density: 20%
+      - Aging Population: 15%
       - Retirement Risk: 15%
-      - Income Level: 8%
+      - HPSA Designation: 10%
+      - Income / Payer Mix: 8%
       - Pop Growth: 7%
     """
+    max_claims = conn.execute(
+        "SELECT MAX(medicare_claims_count) FROM pharmacies WHERE is_independent = 1"
+    ).fetchone()[0] or 1
+    max_income = conn.execute(
+        "SELECT MAX(zip_median_income) FROM pharmacies WHERE zip_median_income > 0"
+    ).fetchone()[0] or 1
+
     pharmacies = conn.execute("""
-        SELECT id, estimated_rx_volume, zip_pharmacies_per_10k,
+        SELECT id, medicare_claims_count, zip_pharmacies_per_10k,
                zip_pct_65_plus, zip_median_income, zip_pop_growth_pct,
-               years_in_operation
-        FROM pharmacies
+               years_in_operation, hpsa_designated
+        FROM pharmacies WHERE is_independent = 1
     """).fetchall()
 
     updates = []
     for row in pharmacies:
-        pid, rx_vol, comp, pct65, income, pop_growth, years_op = row
+        pid, claims, comp, pct65, income, pop_growth, years_op, hpsa = row
+        claims = claims or 0
+        hpsa = hpsa or 0
 
-        # Rx volume score (0-100): normalize to reasonable pharmacy range
-        if rx_vol and rx_vol > 0:
-            rx_score = min(100, (rx_vol / 80000) * 100)
-        else:
-            rx_score = 20  # default for unknown
+        # Medicare Claims (25%)
+        claims_score = min(100, (claims / max_claims * 100)) if max_claims > 0 else 0
 
-        # Competition score (0-100): fewer pharmacies per 10k = better
+        # Competition (20%)
         if comp is not None:
             if comp <= 1:
                 comp_score = 100
-            elif comp <= 3:
+            elif comp <= 2:
                 comp_score = 80
-            elif comp <= 5:
+            elif comp <= 3:
                 comp_score = 60
-            elif comp <= 8:
+            elif comp <= 5:
                 comp_score = 40
-            elif comp <= 12:
+            elif comp <= 8:
                 comp_score = 20
             else:
                 comp_score = 10
         else:
             comp_score = 50
 
-        # Aging population score (0-100)
-        if pct65 is not None:
-            age_score = min(100, (pct65 / 30) * 100)
-        else:
-            age_score = 50
+        # Aging population (15%)
+        age_score = min(100, (pct65 * 4)) if pct65 else 0
 
-        # Retirement risk score (0-100): longer operating = higher score
+        # Retirement risk (15%)
         if years_op is not None:
-            if years_op >= 25:
+            if years_op >= 30:
                 retire_score = 100
+            elif years_op >= 25:
+                retire_score = 85
             elif years_op >= 20:
-                retire_score = 80
+                retire_score = 70
             elif years_op >= 15:
                 retire_score = 50
             elif years_op >= 10:
@@ -224,26 +230,35 @@ def recalc_scores(conn):
             else:
                 retire_score = 10
         else:
-            retire_score = 30  # default unknown
+            retire_score = 10
 
-        # Income score (0-100)
-        if income and income > 0:
-            income_score = min(100, (income / 100000) * 100)
-        else:
-            income_score = 50
+        # HPSA (10%)
+        hpsa_score = 100 if hpsa else 0
 
-        # Pop growth score (0-100)
+        # Income (8%)
+        income_score = min(100, (income / max_income * 100)) if income and max_income > 0 else 0
+
+        # Pop growth (7%)
         if pop_growth is not None:
-            growth_score = min(100, max(0, 50 + pop_growth * 5))
+            if pop_growth > 5:
+                growth_score = 100
+            elif pop_growth > 2:
+                growth_score = 75
+            elif pop_growth > 0:
+                growth_score = 50
+            elif pop_growth > -2:
+                growth_score = 25
+            else:
+                growth_score = 10
         else:
-            growth_score = 50
+            growth_score = 10
 
-        # Weighted total
         score = (
-            rx_score * 0.30 +
+            claims_score * 0.25 +
             comp_score * 0.20 +
-            age_score * 0.20 +
+            age_score * 0.15 +
             retire_score * 0.15 +
+            hpsa_score * 0.10 +
             income_score * 0.08 +
             growth_score * 0.07
         )
