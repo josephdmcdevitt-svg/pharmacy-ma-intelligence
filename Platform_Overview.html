@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #1a1a2e; line-height: 1.6; }
+  h1 { color: #0f172a; border-bottom: 3px solid #3b82f6; padding-bottom: 10px; font-size: 24px; }
+  h2 { color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-top: 32px; font-size: 18px; }
+  h3 { color: #334155; margin-top: 20px; font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px; }
+  th { background: #1e293b; color: white; padding: 10px 14px; text-align: left; font-weight: 600; }
+  td { padding: 8px 14px; border-bottom: 1px solid #e2e8f0; }
+  tr:nth-child(even) { background: #f8fafc; }
+  .highlight { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+  .source-tag { display: inline-block; background: #059669; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .section-intro { color: #475569; font-size: 14px; margin-bottom: 16px; }
+  ul { padding-left: 20px; }
+  li { margin-bottom: 6px; color: #334155; }
+  .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Pharmacy Acquisition Intelligence Platform — Overview</h1>
+
+<p class="section-intro">
+This document explains the data sources, scoring methodology, and intended use of the Pharmacy Acquisition Intelligence Platform. The platform is designed to be used by retail pharmacy chains (e.g., Walgreens, CVS, regional independents) to identify independent pharmacy acquisition targets using publicly available federal data — no estimates or fabricated metrics.
+</p>
+
+<div class="highlight">
+<strong>Key Principle:</strong> Every data point in the platform comes from a real, verifiable federal source. There are no estimated prescription volumes, no fabricated file values, and no made-up metrics. What you see is what the government has published.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>1. Data Sources</h2>
+
+<p>The platform pulls from four primary federal data sources, each providing different pieces of the picture:</p>
+
+<table>
+<tr>
+  <th>Source</th>
+  <th>What It Provides</th>
+  <th>Update Frequency</th>
+  <th>Confidence</th>
+</tr>
+<tr>
+  <td><strong>NPPES (NPI Registry)</strong><br><span style="color:#64748b;font-size:11px;">CMS / download.cms.gov</span></td>
+  <td>NPI numbers, pharmacy names, addresses, phone numbers, taxonomy codes (pharmacy type), authorized official names/titles/phones, entity types, enumeration dates, last update dates, deactivation status</td>
+  <td>Monthly</td>
+  <td><span class="source-tag">HIGH</span></td>
+</tr>
+<tr>
+  <td><strong>CMS Medicare Part D Prescriber PUF</strong><br><span style="color:#64748b;font-size:11px;">data.cms.gov</span></td>
+  <td>Actual Medicare prescription claim counts per NPI, beneficiary counts, total drug costs, brand vs. generic claim splits, opioid claims, antibiotic claims, average cost per claim</td>
+  <td>Annual</td>
+  <td><span class="source-tag">HIGH</span></td>
+</tr>
+<tr>
+  <td><strong>U.S. Census ACS (5-Year Estimates)</strong><br><span style="color:#64748b;font-size:11px;">data.census.gov / api.census.gov</span></td>
+  <td>Population by ZIP, median age, % population 65+, median household income, % uninsured, % disabled, % below poverty line, population growth rate, total households</td>
+  <td>Annual</td>
+  <td><span class="source-tag">HIGH</span></td>
+</tr>
+<tr>
+  <td><strong>HRSA Health Professional Shortage Areas</strong><br><span style="color:#64748b;font-size:11px;">data.hrsa.gov</span></td>
+  <td>HPSA designation (whether an area is a federally-designated Health Professional Shortage Area), HPSA severity scores, medically underserved area status</td>
+  <td>Quarterly</td>
+  <td><span class="source-tag">HIGH</span></td>
+</tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>2. What Each Source Tells You</h2>
+
+<h3>NPPES (NPI Registry) — The Foundation</h3>
+<p>This is the master list of every pharmacy in the United States. Every pharmacy that bills Medicare/Medicaid must have an NPI number. The platform uses this to:</p>
+<ul>
+  <li><strong>Identify every independent pharmacy</strong> — by cross-referencing organization names against known chain patterns (CVS, Walgreens, Walmart, etc.) and flagging multi-location operators</li>
+  <li><strong>Get owner/contact information</strong> — the "Authorized Official" is typically the pharmacy owner or managing pharmacist, with their direct phone number</li>
+  <li><strong>Determine how long a pharmacy has been operating</strong> — the NPI enumeration date tells you exactly when they registered, so "years in operation" is calculated from real data</li>
+  <li><strong>Detect closing signals</strong> — NPI deactivation dates show recently closed pharmacies, and "last update date" shows when the owner last touched their registration (stale = potentially disengaged owner)</li>
+  <li><strong>Cross-reference with your internal systems</strong> — the NPI number is the universal pharmacy identifier that your claims systems, PBM contracts, and wholesaler records all use</li>
+</ul>
+
+<h3>CMS Medicare Part D — Real Prescription Volume</h3>
+<p>This is the single most valuable data source for pharmacy acquisitions. CMS publishes actual Medicare prescription claim data by NPI, including:</p>
+<ul>
+  <li><strong>Total claim count</strong> — the real number of Medicare prescriptions filled at that pharmacy</li>
+  <li><strong>Beneficiary count</strong> — how many unique Medicare patients use that pharmacy</li>
+  <li><strong>Total drug cost</strong> — the actual dollar volume of drugs dispensed under Medicare</li>
+  <li><strong>Brand vs. generic split</strong> — tells you about the pharmacy's dispensing patterns and potential margin profile</li>
+  <li><strong>Opioid and antibiotic claims</strong> — useful for compliance assessment</li>
+</ul>
+
+<div class="highlight">
+<strong>Important:</strong> Medicare Part D data represents roughly 30-40% of a typical independent pharmacy's total prescription volume. Retail chains like Walgreens and CVS can cross-reference these Medicare claim counts against their own PBM data and third-party prescription data (IQVIA, Surescripts) to build a more complete picture of total volume.
+</div>
+
+<h3>Census ACS — Market Demographics</h3>
+<p>Demographics tell you about the market a pharmacy serves:</p>
+<ul>
+  <li><strong>% population 65+</strong> — seniors fill 2-3x more prescriptions than younger adults. A ZIP with 25%+ seniors is a high-value pharmacy market</li>
+  <li><strong>Median income</strong> — higher income areas typically have better commercial payer mix (higher reimbursement rates)</li>
+  <li><strong>% uninsured</strong> — high uninsured rates mean more cash-pay patients (lower volume but sometimes higher margin)</li>
+  <li><strong>Population growth</strong> — growing markets mean the pharmacy's patient base is expanding naturally</li>
+  <li><strong>% disabled</strong> — disabled populations have higher medication utilization</li>
+</ul>
+
+<h3>HRSA Shortage Areas — Competitive Moats</h3>
+<p>Pharmacies in HPSAs (Health Professional Shortage Areas) have a natural competitive advantage:</p>
+<ul>
+  <li>Fewer competitors in the area by definition</li>
+  <li>Higher patient need and medication utilization</li>
+  <li>Potential eligibility for 340B pricing (significant margin advantage)</li>
+  <li>Less likely to face new competitor entry</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>3. Acquisition Scoring Methodology</h2>
+
+<p>Every independent pharmacy receives a score from 0-100 based entirely on real, verifiable data:</p>
+
+<table>
+<tr>
+  <th>Factor</th>
+  <th>Weight</th>
+  <th>Data Source</th>
+  <th>Why It Matters for Acquisitions</th>
+</tr>
+<tr>
+  <td><strong>Medicare Part D Claims</strong></td>
+  <td>25%</td>
+  <td>CMS Part D PUF</td>
+  <td>Real prescription volume — higher claims = more valuable pharmacy. This is the closest public proxy to actual Rx volume.</td>
+</tr>
+<tr>
+  <td><strong>Competition Density</strong></td>
+  <td>20%</td>
+  <td>NPPES (calculated)</td>
+  <td>Pharmacies per 10,000 population in the ZIP. Fewer nearby pharmacies = easier to retain patients after acquisition.</td>
+</tr>
+<tr>
+  <td><strong>Aging Population (65+)</strong></td>
+  <td>15%</td>
+  <td>Census ACS</td>
+  <td>Seniors fill 2-3x more prescriptions. High 65+ percentage = high medication demand in the market.</td>
+</tr>
+<tr>
+  <td><strong>Retirement Risk</strong></td>
+  <td>15%</td>
+  <td>NPPES Enumeration Date</td>
+  <td>Pharmacies operating 25+ years = owner likely 60+ and approaching retirement. Most willing sellers.</td>
+</tr>
+<tr>
+  <td><strong>HPSA Designation</strong></td>
+  <td>10%</td>
+  <td>HRSA</td>
+  <td>Federally-designated shortage area = less competition, higher need, potential 340B eligibility.</td>
+</tr>
+<tr>
+  <td><strong>Income / Payer Mix</strong></td>
+  <td>8%</td>
+  <td>Census ACS</td>
+  <td>Higher median income = better commercial insurance penetration = higher reimbursement rates.</td>
+</tr>
+<tr>
+  <td><strong>Population Growth</strong></td>
+  <td>7%</td>
+  <td>Census ACS</td>
+  <td>Growing market = natural patient base expansion. The acquired pharmacy's value appreciates over time.</td>
+</tr>
+</table>
+
+<h3>Score Tiers</h3>
+<table>
+<tr><th>Score Range</th><th>Tier</th><th>What It Means</th></tr>
+<tr><td>70-100</td><td><strong>Strong Buy</strong></td><td>High-value target with multiple favorable factors. Prioritize for outreach.</td></tr>
+<tr><td>55-69</td><td><strong>Good</strong></td><td>Solid target with good fundamentals. Worth pursuing.</td></tr>
+<tr><td>40-54</td><td><strong>Average</strong></td><td>May be worth pursuing depending on strategic fit and price.</td></tr>
+<tr><td>0-39</td><td><strong>Below Average</strong></td><td>Weaker target. May still have value in specific strategic contexts (e.g., geographic fill-in).</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>4. How to Use This With Your Existing Resources</h2>
+
+<p>The platform is designed to complement — not replace — the data and tools that retail pharmacy chains already have access to:</p>
+
+<h3>Cross-Reference with Internal Claims Data</h3>
+<ul>
+  <li><strong>NPI matching:</strong> Every pharmacy in the platform has an NPI number. Use this to match against your PBM claims data, wholesaler purchase records, and internal competitive intelligence</li>
+  <li><strong>Medicare as a baseline:</strong> The Medicare Part D claims represent ~30-40% of typical independent volume. Your internal data can fill in commercial, Medicaid, and cash volume to get the full picture</li>
+  <li><strong>Validate the score:</strong> A pharmacy scoring 80+ in our system that also shows high volume in your claims data is a double-confirmed high-value target</li>
+</ul>
+
+<h3>Combine with Third-Party Data</h3>
+<ul>
+  <li><strong>IQVIA / Symphony Health:</strong> Match NPIs to get total Rx volume (all payers), therapeutic mix, and market share data</li>
+  <li><strong>Surescripts:</strong> Real-time prescription routing data can show current fill volumes</li>
+  <li><strong>Wholesaler data (McKesson, AmerisourceBergen, Cardinal):</strong> Purchase volume by NPI gives you actual drug purchasing patterns</li>
+  <li><strong>State Board of Pharmacy:</strong> License status, disciplinary actions, inspection history</li>
+</ul>
+
+<h3>Workflow Integration</h3>
+<ol>
+  <li><strong>Identify targets</strong> — Use the platform's Top Targets and Query Tools to build a shortlist</li>
+  <li><strong>Enrich internally</strong> — Match NPIs against your claims/PBM data for total volume picture</li>
+  <li><strong>Prioritize outreach</strong> — Use Closing Signals (long-tenured, stale records) to identify most willing sellers</li>
+  <li><strong>Track deals</strong> — Use the Deal Pipeline to manage outreach status across the team</li>
+  <li><strong>Export lists</strong> — Every view has CSV export for loading into your CRM or outreach tools</li>
+</ol>
+
+<h3>For Tuck-in Acquisitions Specifically</h3>
+<p>The Tuck-in Finder lets you enter any store's ZIP code and find nearby independent pharmacies. This is designed for:</p>
+<ul>
+  <li>District managers looking for file acquisitions near existing stores</li>
+  <li>M&A teams evaluating geographic density plays</li>
+  <li>Market planning teams assessing competitive landscape by ZIP</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>5. Key Features</h2>
+
+<table>
+<tr><th>Feature</th><th>What It Does</th></tr>
+<tr><td><strong>Dashboard</strong></td><td>Overview metrics, score distribution, top 100 targets at a glance</td></tr>
+<tr><td><strong>Top Targets</strong></td><td>Searchable/filterable list of all independent pharmacies with click-to-expand detail and deal tracking</td></tr>
+<tr><td><strong>Closing Signals</strong></td><td>Pharmacies showing retirement risk (20+ yrs), stale NPI records (3+ yrs no update), or nearby recent closures</td></tr>
+<tr><td><strong>Query Tools</strong></td><td>Pre-built analyses: Retirement Hotspots, Underserved Markets, HPSA Targets, Cold Call Lists, Multi-Target Clusters, Medicare Volume Leaders</td></tr>
+<tr><td><strong>Tuck-in Finder</strong></td><td>Enter your store's ZIP, find nearby independent targets for file acquisition</td></tr>
+<tr><td><strong>Deal Pipeline</strong></td><td>Track outreach status (Not Contacted > Researching > Contacted > In Discussion > LOI > Contract > Closed)</td></tr>
+<tr><td><strong>Market Map</strong></td><td>Choropleth map of the US colored by independent count, Medicare claims, demographics, competition, HPSA status</td></tr>
+<tr><td><strong>Data Sources</strong></td><td>Transparency page showing exactly where every data point comes from and current data coverage</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>6. Data Coverage</h2>
+
+<ul>
+  <li><strong>112,537 total pharmacies</strong> in the database (all pharmacy NPIs in the US)</li>
+  <li><strong>65,279 independent pharmacies</strong> identified and scored</li>
+  <li><strong>50 states + DC + territories</strong> covered</li>
+  <li>NPI data current as of the latest NPPES monthly release</li>
+  <li>Medicare Part D data from the most recent CMS annual release</li>
+  <li>Census demographics from ACS 5-year estimates</li>
+</ul>
+
+<div class="highlight">
+<strong>Data Refresh:</strong> The enrichment script (<code>enrich_data.py</code>) can be re-run at any time to pull the latest data from CMS, Census, and HRSA APIs. NPPES data is refreshed by downloading the latest monthly file from CMS.
+</div>
+
+<div class="footer">
+  Pharmacy Acquisition Intelligence Platform<br>
+  All data sourced from public federal databases: CMS, Census Bureau, HRSA<br>
+  No estimated or fabricated metrics. Every data point is verifiable.
+</div>
+
+</body>
+</html>

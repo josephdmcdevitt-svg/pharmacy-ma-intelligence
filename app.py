@@ -655,8 +655,16 @@ if page == "Dashboard":
                                   "Strong Buy (70+)": "#059669", "Good (55-70)": "#10b981",
                                   "Average (40-55)": "#f59e0b", "Below Avg (<40)": "#ef4444",
                               }, hole=0.4)
-                fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=350,
-                                   paper_bgcolor="rgba(0,0,0,0)")
+                fig2.update_layout(
+                    margin=dict(t=10, b=10, l=0, r=0), height=300,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=-0.15,
+                        xanchor="center", x=0.5, font=dict(size=11),
+                    ),
+                    autosize=True,
+                )
+                fig2.update_traces(textposition="inside", textinfo="percent")
                 st.plotly_chart(fig2, use_container_width=True)
 
         # Top 100 targets table
@@ -732,13 +740,9 @@ elif page == "Top Targets":
         sort_by = sort_options[sort_label]
 
     # Toggle filters
-    tcol1, tcol2, tcol3 = st.columns(3)
+    tcol1, tcol2 = st.columns(2)
     with tcol1:
-        hpsa_only = st.toggle("Shortage Areas Only", value=False, key="hpsa_filter")
-    with tcol2:
         long_tenured_only = st.toggle("20+ Years Only", value=False, key="tenure_filter")
-    with tcol3:
-        has_medicare = st.toggle("Has Medicare Data", value=False, key="medicare_filter")
     st.markdown('</div>', unsafe_allow_html=True)
 
     if "target_page" not in st.session_state:
@@ -758,12 +762,8 @@ elif page == "Top Targets":
     if min_score > 0:
         conditions.append("acquisition_score >= ?")
         params.append(min_score)
-    if hpsa_only:
-        conditions.append("hpsa_designated = 1")
     if long_tenured_only:
         conditions.append("years_in_operation >= 20")
-    if has_medicare:
-        conditions.append("medicare_claims_count IS NOT NULL AND medicare_claims_count > 0")
 
     where = "WHERE " + " AND ".join(conditions)
     order_map = {
@@ -1669,12 +1669,10 @@ elif page == "Directory":
     with col4:
         zip_code = st.text_input("ZIP")
 
-    tcol1, tcol2, tcol3 = st.columns(3)
+    tcol1, tcol2 = st.columns(2)
     with tcol1:
         independent_only = st.toggle("Independent Only", value=True, key="dir_indep")
     with tcol2:
-        has_medicare_dir = st.toggle("Has Medicare Data", value=False, key="dir_medicare")
-    with tcol3:
         sort_opts = {
             "Acq. Score": "acquisition_score",
             "Name": "organization_name",
@@ -1706,8 +1704,6 @@ elif page == "Directory":
         params.append(f"{zip_code}%")
     if independent_only:
         conditions.append("is_independent = 1")
-    if has_medicare_dir:
-        conditions.append("medicare_claims_count IS NOT NULL AND medicare_claims_count > 0")
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     order_map = {
