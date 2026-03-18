@@ -394,7 +394,7 @@ def recalculate_scores():
     pharmacies = conn.execute("""
         SELECT id, medicare_claims_count, competition_score, zip_pct_65_plus,
                years_in_operation, hpsa_designated, zip_median_income,
-               zip_pop_growth_pct
+               zip_pop_growth_pct, nearest_walgreens_miles
         FROM pharmacies WHERE is_independent = 1
     """).fetchall()
 
@@ -408,6 +408,7 @@ def recalculate_scores():
         hpsa = p[5] or 0
         income = p[6] or 0
         growth = p[7] or 0
+        wg_miles = p[8]  # may be None
 
         # Medicare Claims (25%) — normalized to 0-100 scale
         claims_score = min(100, (claims / max_claims * 100)) if max_claims > 0 else 0
@@ -450,7 +451,7 @@ def recalculate_scores():
         else:
             growth_score = 10
 
-        # Weighted total
+        # Weighted total (7 factors sum to 100%)
         total = (
             claims_score * 0.25 +
             comp_score * 0.20 +
@@ -460,6 +461,24 @@ def recalculate_scores():
             income_score * 0.08 +
             growth_score * 0.07
         )
+
+        # ── Walgreens Distance Adjustment (post-hoc penalty/bonus) ────────
+        # Rationale: Pharmacies far from a Walgreens are harder to integrate
+        # into a retail chain acquisition and likely lack chain-level foot traffic.
+        # Being very close to a Walgreens is a mild positive (proven market),
+        # but being far away is a significant red flag.
+        if wg_miles is not None:
+            if wg_miles > 15:
+                # Severe penalty for being too far from any Walgreens footprint.
+                # Scale: 16 mi = -15 pts, 30 mi = -20 pts, 50+ mi = -25 pts max.
+                penalty = min(25, 15 + (wg_miles - 15) * 0.4)
+                total = max(0, total - penalty)
+            else:
+                # Small bonus for being within 15 miles — closer = slightly better,
+                # but capped at 5 points so it doesn't dominate the score.
+                # 0 mi = +5, 7.5 mi = +2.5, 15 mi = 0
+                bonus = max(0, 5 * (1 - wg_miles / 15))
+                total = min(100, total + bonus)
 
         conn.execute(
             "UPDATE pharmacies SET acquisition_score = ? WHERE id = ?",

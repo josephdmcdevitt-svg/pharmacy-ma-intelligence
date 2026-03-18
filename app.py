@@ -415,6 +415,7 @@ def init_db():
         "medically_underserved": "INTEGER DEFAULT 0",
         "zip_chain_count": "INTEGER",
         "zip_independent_count": "INTEGER",
+        "nearest_walgreens_miles": "REAL",
     }
     for col, dtype in new_cols.items():
         if col not in existing:
@@ -556,7 +557,8 @@ st.sidebar.divider()
 page = st.sidebar.radio(
     "Navigation",
     ["Dashboard", "Top Targets", "Closing Signals", "Query Tools",
-     "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map", "Data Sources"],
+     "Tuck-in Finder", "Directory", "Deal Pipeline", "Market Map",
+     "Pharmacy Map", "Data Sources"],
     label_visibility="collapsed",
 )
 
@@ -858,13 +860,16 @@ elif page == "Top Targets":
                 st.subheader(detail["organization_name"])
 
                 # Key metrics row
-                fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
+                fc1, fc2, fc3, fc4, fc5, fc6, fc7 = st.columns(7)
                 fc1.metric("NPI", detail.get("npi", "—"))
                 fc2.metric("Medicare Claims", fmt(detail.get("medicare_claims_count")))
                 fc3.metric("Beneficiaries", fmt(detail.get("medicare_beneficiary_count")))
                 fc4.metric("Medicare Cost", fmt_currency(detail.get("medicare_total_cost")))
                 fc5.metric("Acq. Score", f"{score:.1f}/100" if score else "—")
                 fc6.metric("Pharmacies in ZIP", detail.get("zip_pharmacy_count", "—"))
+                wg_dist = detail.get("nearest_walgreens_miles")
+                fc7.metric("Dist. to Walgreens",
+                           f"{wg_dist:.1f} mi" if wg_dist is not None else "—")
 
                 # Contact info
                 st.markdown("---")
@@ -974,6 +979,10 @@ elif page == "Top Targets":
         | **HPSA Designation** | 10% | HRSA | Shortage area = underserved patients, less competition |
         | **Income / Payer Mix** | 8% | Census ACS | Higher income area = better commercial payer mix |
         | **Pop Growth** | 7% | Census ACS | Growing market = appreciating value |
+
+        **Walgreens Distance Adjustment** (post-scoring penalty/bonus, not a weighted factor):
+        - More than 15 miles from nearest Walgreens: severe penalty of 15-25 points — markets that far outside the Walgreens footprint are harder to integrate and may lack chain-level demand signals.
+        - Within 15 miles: small bonus of up to 5 points — proximity confirms a proven pharmacy market, but closeness alone is not a major driver.
 
         All data comes from public federal sources. No estimates or fabricated metrics.
         """)
@@ -1891,6 +1900,153 @@ elif page == "Market Map":
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PHARMACY MAP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Pharmacy Map":
+    st.title("Pharmacy Map")
+    st.caption("Interactive map of all independent pharmacies — color-coded by acquisition score. Green = high score, red = low score.")
+
+    import plotly.express as px
+
+    if stats["total"] == 0:
+        st.info("No data loaded. Run the pipeline script first.")
+    else:
+        conn = get_db()
+
+        # State filter
+        all_states_map = get_all_states()
+        state_opts_map = ["All States"] + [s for s, _ in all_states_map]
+        map_state = st.selectbox("Filter by State", state_opts_map, key="pharm_map_state")
+
+        # Score range filter
+        score_col1, score_col2 = st.columns(2)
+        with score_col1:
+            map_min_score = st.slider("Min Acquisition Score", 0, 100, 0, key="map_min_score")
+        with score_col2:
+            map_max_points = st.number_input(
+                "Max pharmacies to display (for performance)",
+                min_value=500, max_value=20000, value=5000, step=500,
+                key="map_max_points"
+            )
+
+        where_parts = ["is_independent = 1", "latitude IS NOT NULL", "longitude IS NOT NULL",
+                       "latitude BETWEEN 24 AND 50", "longitude BETWEEN -130 AND -65"]
+        map_params = []
+
+        if map_state != "All States":
+            where_parts.append("state = ?")
+            map_params.append(map_state)
+
+        if map_min_score > 0:
+            where_parts.append("acquisition_score >= ?")
+            map_params.append(map_min_score)
+
+        map_where = "WHERE " + " AND ".join(where_parts)
+
+        total_map = conn.execute(
+            f"SELECT COUNT(*) FROM pharmacies {map_where}", map_params
+        ).fetchone()[0]
+
+        map_rows = conn.execute(
+            f"""SELECT organization_name, city, state, zip,
+                       latitude, longitude,
+                       ROUND(acquisition_score, 1) as acquisition_score,
+                       nearest_walgreens_miles,
+                       deal_status
+                FROM pharmacies {map_where}
+                ORDER BY acquisition_score DESC NULLS LAST
+                LIMIT ?""",
+            map_params + [int(map_max_points)],
+        ).fetchall()
+        conn.close()
+
+        map_df = pd.DataFrame([dict(r) for r in map_rows])
+
+        if map_df.empty:
+            st.warning("No pharmacies match those filters.")
+        else:
+            st.caption(
+                f"Showing **{len(map_df):,}** of **{total_map:,}** pharmacies "
+                f"(sorted by highest score first)."
+            )
+
+            # Build hover text
+            def build_hover(row):
+                name = row.get("organization_name") or "Unknown"
+                city = row.get("city") or ""
+                state = row.get("state") or ""
+                score = row.get("acquisition_score")
+                score_str = f"{score:.1f}" if score is not None and pd.notna(score) else "N/A"
+                wg = row.get("nearest_walgreens_miles")
+                wg_str = f"{wg:.1f} mi" if wg is not None and pd.notna(wg) else "N/A"
+                status = row.get("deal_status") or "Not Contacted"
+                return (
+                    f"<b>{name}</b><br>"
+                    f"{city}, {state}<br>"
+                    f"Score: {score_str}<br>"
+                    f"Nearest Walgreens: {wg_str}<br>"
+                    f"Status: {status}"
+                )
+
+            map_df["hover_text"] = map_df.apply(build_hover, axis=1)
+
+            # Color scale: fill NaN scores with 0 for coloring
+            map_df["score_for_color"] = map_df["acquisition_score"].fillna(0)
+
+            fig_map = px.scatter_mapbox(
+                map_df,
+                lat="latitude",
+                lon="longitude",
+                color="score_for_color",
+                color_continuous_scale=[
+                    [0.0, "#dc2626"],    # red — low score
+                    [0.4, "#f59e0b"],    # amber — mid
+                    [0.65, "#10b981"],   # green — good
+                    [1.0, "#059669"],    # dark green — high score
+                ],
+                range_color=[0, 100],
+                hover_name="organization_name",
+                custom_data=["hover_text"],
+                zoom=3.5,
+                center={"lat": 38.5, "lon": -97.0},
+                mapbox_style="open-street-map",
+                height=680,
+                labels={"score_for_color": "Acq. Score"},
+            )
+
+            fig_map.update_traces(
+                hovertemplate="%{customdata[0]}<extra></extra>",
+                marker=dict(size=5, opacity=0.75),
+            )
+
+            fig_map.update_layout(
+                margin=dict(t=10, b=10, l=0, r=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                coloraxis_colorbar=dict(
+                    title="Score",
+                    thickness=14,
+                    len=0.6,
+                    tickvals=[0, 25, 50, 75, 100],
+                ),
+            )
+
+            st.plotly_chart(fig_map, use_container_width=True)
+
+            # Quick stats below the map
+            st.divider()
+            ms1, ms2, ms3, ms4 = st.columns(4)
+            avg_s = map_df["acquisition_score"].mean()
+            high_count = (map_df["acquisition_score"] >= 70).sum()
+            has_wg = map_df["nearest_walgreens_miles"].notna().sum()
+            far_wg = (map_df["nearest_walgreens_miles"] > 15).sum()
+            ms1.metric("Avg Score (shown)", f"{avg_s:.1f}" if pd.notna(avg_s) else "—")
+            ms2.metric("Score 70+ (shown)", f"{high_count:,}")
+            ms3.metric("With Walgreens Dist.", f"{has_wg:,}")
+            ms4.metric(">15 mi from Walgreens", f"{far_wg:,}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # DATA SOURCES
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1979,6 +2135,10 @@ elif page == "Data Sources":
     | HPSA Designation | 10% | HRSA | Bonus for being in a shortage area |
     | Income / Payer Mix | 8% | Census ACS | Median household income in ZIP |
     | Population Growth | 7% | Census ACS | ZIP population growth rate |
+
+    **Walgreens Distance Adjustment** (applied after the weighted score above):
+    - More than 15 miles from nearest Walgreens: -15 to -25 point penalty (scales with distance)
+    - Within 15 miles of a Walgreens: up to +5 point bonus (scales with proximity)
 
     **All inputs are real, publicly-available federal data. No estimates.**
     """)
