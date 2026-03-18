@@ -684,7 +684,8 @@ if page == "Dashboard":
                    ROUND(years_in_operation, 0) as years_open,
                    hpsa_designated,
                    ROUND(acquisition_score, 1) as score,
-                   deal_status
+                   deal_status,
+                   ROUND(nearest_walgreens_miles, 1) as walgreens_dist
             FROM pharmacies WHERE acquisition_score IS NOT NULL
             ORDER BY acquisition_score DESC LIMIT 100
         """).fetchall()
@@ -694,7 +695,7 @@ if page == "Dashboard":
             top_df.columns = ["NPI", "Name", "City", "State", "Phone", "Owner/Official",
                               "Medicare Claims", "Medicare Beneficiaries", "Medicare Cost",
                               "Pharmacies in ZIP", "% 65+", "Years Open",
-                              "HPSA", "Score", "Deal Status"]
+                              "HPSA", "Score", "Deal Status", "Walgreens Dist."]
             top_df["Medicare Cost"] = top_df["Medicare Cost"].apply(
                 lambda x: fmt_currency(x) if pd.notna(x) and x else "—")
             top_df["Medicare Claims"] = top_df["Medicare Claims"].apply(
@@ -706,6 +707,8 @@ if page == "Dashboard":
                 lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
             top_df["Years Open"] = top_df["Years Open"].apply(
                 lambda x: f"{int(x)}" if pd.notna(x) and x else "—")
+            top_df["Walgreens Dist."] = top_df["Walgreens Dist."].apply(
+                lambda x: f"{x:.1f} mi" if pd.notna(x) and x else "—")
             st.dataframe(top_df, use_container_width=True, hide_index=True, height=600)
 
 
@@ -807,6 +810,7 @@ elif page == "Top Targets":
         display_cols = ["npi", "organization_name", "city", "state", "phone",
                         "medicare_claims_count", "medicare_beneficiary_count",
                         "medicare_total_cost", "acquisition_score",
+                        "nearest_walgreens_miles",
                         "years_in_operation", "zip_pct_65_plus",
                         "zip_pharmacy_count", "hpsa_designated", "deal_status"]
         display_cols = [c for c in display_cols if c in df.columns]
@@ -831,6 +835,9 @@ elif page == "Top Targets":
                 lambda x: f"{int(x)}" if pd.notna(x) and x else "—")
         if "hpsa_designated" in display_df.columns:
             display_df["hpsa_designated"] = display_df["hpsa_designated"].map({1: "Yes", 0: "No", None: "—"})
+        if "nearest_walgreens_miles" in display_df.columns:
+            display_df["nearest_walgreens_miles"] = display_df["nearest_walgreens_miles"].apply(
+                lambda x: f"{x:.1f} mi" if pd.notna(x) and x else "—")
 
         rename = {
             "npi": "NPI", "organization_name": "Name", "city": "City", "state": "ST",
@@ -838,6 +845,7 @@ elif page == "Top Targets":
             "medicare_beneficiary_count": "Beneficiaries",
             "medicare_total_cost": "Medicare Cost",
             "acquisition_score": "Score",
+            "nearest_walgreens_miles": "Walgreens Dist.",
             "years_in_operation": "Years Open",
             "zip_pct_65_plus": "% 65+",
             "zip_pharmacy_count": "Pharmacies in ZIP",

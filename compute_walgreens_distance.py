@@ -181,7 +181,7 @@ def main():
         batch_ids = pharm_ids[i:i+batch_size]
         batch_dists = distances_miles[i:i+batch_size]
         updates = [
-            (round(float(d), 2), pid)
+            (max(0.1, round(float(d), 1)), pid)
             for pid, d in zip(batch_ids, batch_dists)
         ]
         conn.executemany(
